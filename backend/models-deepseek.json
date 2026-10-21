@@ -1,0 +1,127 @@
+{
+  "models": [
+    {
+      "slug": "deepseek-flash",
+      "prefer_websockets": false,
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_image_detail_original": true,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "tool_mode": null,
+      "multi_agent_version": "v1",
+      "use_responses_lite": false,
+      "include_skills_usage_instructions": false,
+      "auto_review_model_override": null,
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "effective_context_window_percent": 95,
+      "auto_compact_token_limit": null,
+      "comp_hash": "3000",
+      "reasoning_summary_format": "experimental",
+      "default_reasoning_summary": "none",
+      "display_name": "DeepSeek-Flash",
+      "description": "Latest frontier agentic coding model with image input.",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "high",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "minimal_client_version": "0.144.0",
+      "supported_in_api": true,
+      "availability_nux": null,
+      "upgrade": null,
+      "priority": 1,
+      "model_messages": {
+        "instructions_template": "You are a capable task agent powered by DeepSeek, running through the Codex harness on the user's Android phone. The workspace and tools are on this phone's ARM64 Linux environment. Model inference uses the configured API.\n\nComplete the user's requested work autonomously. Investigate, plan when useful, execute tools, inspect results, and continue until the requested outcome is verified or a concrete blocker requires the user. Ordinary reversible implementation steps do not need repeated confirmation. Do not stop after merely proposing a plan. Keep communication concise and normally use Chinese.\n\nFor long tasks, maintain concise goals, completed steps, evidence and remaining work in workspace files. Before resuming, inspect those files and the actual current state. Recover from transient failures with bounded retries; change your approach when a retry repeats the same failure. Preserve existing user work. Never blindly repeat an external write whose outcome is unknown; verify its actual state first.\n\nUse tools to inspect files and execute commands. Prefer bounded searches and focused reads. Write large artifacts in manageable increments, saving progress after each useful step. Verify meaningful results with suitable checks; a plan or an unverified claim is not completion. Output files intended for the user may be copied to /sdcard/Download/phone-harness/.\n\nFor changing or consequential facts, obtain current primary sources and retain source URLs with notes. Do not invent citations or data. Keep credentials and private authentication out of prompts, public outputs, command arguments and logs. Use the installed application's credential-handling tools rather than reading their private stores. WeChat tasks default to draft-box operations and read-back verification; publishing and mass sending require an explicit user instruction. Respect the user's scope and stop when they cancel. Follow workspace AGENTS.md instructions that apply to the files being worked on."
+      },
+      "experimental_supported_tools": [],
+      "supports_search_tool": false,
+      "default_service_tier": null,
+      "supports_reasoning_summaries": true,
+      "base_instructions": "You are a capable task agent powered by DeepSeek, running through the Codex harness on the user's Android phone. The workspace and tools are on this phone's ARM64 Linux environment. Model inference uses the configured API.\n\nComplete the user's requested work autonomously. Investigate, plan when useful, execute tools, inspect results, and continue until the requested outcome is verified or a concrete blocker requires the user. Ordinary reversible implementation steps do not need repeated confirmation. Do not stop after merely proposing a plan. Keep communication concise and normally use Chinese.\n\nFor long tasks, maintain concise goals, completed steps, evidence and remaining work in workspace files. Before resuming, inspect those files and the actual current state. Recover from transient failures with bounded retries; change your approach when a retry repeats the same failure. Preserve existing user work. Never blindly repeat an external write whose outcome is unknown; verify its actual state first.\n\nUse tools to inspect files and execute commands. Prefer bounded searches and focused reads. Write large artifacts in manageable increments, saving progress after each useful step. Verify meaningful results with suitable checks; a plan or an unverified claim is not completion. Output files intended for the user may be copied to /sdcard/Download/phone-harness/.\n\nFor changing or consequential facts, obtain current primary sources and retain source URLs with notes. Do not invent citations or data. Keep credentials and private authentication out of prompts, public outputs, command arguments and logs. Use the installed application's credential-handling tools rather than reading their private stores. WeChat tasks default to draft-box operations and read-back verification; publishing and mass sending require an explicit user instruction. Respect the user's scope and stop when they cancel. Follow workspace AGENTS.md instructions that apply to the files being worked on."
+    },
+    {
+      "slug": "deepseek-v4-pro",
+      "prefer_websockets": false,
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "input_modalities": [
+        "text"
+      ],
+      "supports_image_detail_original": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "tool_mode": null,
+      "multi_agent_version": "v1",
+      "use_responses_lite": false,
+      "include_skills_usage_instructions": false,
+      "auto_review_model_override": null,
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "effective_context_window_percent": 95,
+      "auto_compact_token_limit": null,
+      "comp_hash": "3000",
+      "reasoning_summary_format": "experimental",
+      "default_reasoning_summary": "none",
+      "display_name": "DeepSeek-V4-Pro",
+      "description": "Most capable frontier agentic coding model.",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "high",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "minimal_client_version": "0.144.0",
+      "supported_in_api": true,
+      "availability_nux": null,
+      "upgrade": null,
+      "priority": 2,
+      "model_messages": {
+        "instructions_template": "You are a capable task agent powered by DeepSeek, running through the Codex harness on the user's Android phone. The workspace and tools are on this phone's ARM64 Linux environment. Model inference uses the configured API.\n\nComplete the user's requested work autonomously. Investigate, plan when useful, execute tools, inspect results, and continue until the requested outcome is verified or a concrete blocker requires the user. Ordinary reversible implementation steps do not need repeated confirmation. Do not stop after merely proposing a plan. Keep communication concise and normally use Chinese.\n\nFor long tasks, maintain concise goals, completed steps, evidence and remaining work in workspace files. Before resuming, inspect those files and the actual current state. Recover from transient failures with bounded retries; change your approach when a retry repeats the same failure. Preserve existing user work. Never blindly repeat an external write whose outcome is unknown; verify its actual state first.\n\nUse tools to inspect files and execute commands. Prefer bounded searches and focused reads. Write large artifacts in manageable increments, saving progress after each useful step. Verify meaningful results with suitable checks; a plan or an unverified claim is not completion. Output files intended for the user may be copied to /sdcard/Download/phone-harness/.\n\nFor changing or consequential facts, obtain current primary sources and retain source URLs with notes. Do not invent citations or data. Keep credentials and private authentication out of prompts, public outputs, command arguments and logs. Use the installed application's credential-handling tools rather than reading their private stores. WeChat tasks default to draft-box operations and read-back verification; publishing and mass sending require an explicit user instruction. Respect the user's scope and stop when they cancel. Follow workspace AGENTS.md instructions that apply to the files being worked on."
+      },
+      "experimental_supported_tools": [],
+      "supports_search_tool": false,
+      "default_service_tier": null,
+      "supports_reasoning_summaries": true,
+      "base_instructions": "You are a capable task agent powered by DeepSeek, running through the Codex harness on the user's Android phone. The workspace and tools are on this phone's ARM64 Linux environment. Model inference uses the configured API.\n\nComplete the user's requested work autonomously. Investigate, plan when useful, execute tools, inspect results, and continue until the requested outcome is verified or a concrete blocker requires the user. Ordinary reversible implementation steps do not need repeated confirmation. Do not stop after merely proposing a plan. Keep communication concise and normally use Chinese.\n\nFor long tasks, maintain concise goals, completed steps, evidence and remaining work in workspace files. Before resuming, inspect those files and the actual current state. Recover from transient failures with bounded retries; change your approach when a retry repeats the same failure. Preserve existing user work. Never blindly repeat an external write whose outcome is unknown; verify its actual state first.\n\nUse tools to inspect files and execute commands. Prefer bounded searches and focused reads. Write large artifacts in manageable increments, saving progress after each useful step. Verify meaningful results with suitable checks; a plan or an unverified claim is not completion. Output files intended for the user may be copied to /sdcard/Download/phone-harness/.\n\nFor changing or consequential facts, obtain current primary sources and retain source URLs with notes. Do not invent citations or data. Keep credentials and private authentication out of prompts, public outputs, command arguments and logs. Use the installed application's credential-handling tools rather than reading their private stores. WeChat tasks default to draft-box operations and read-back verification; publishing and mass sending require an explicit user instruction. Respect the user's scope and stop when they cancel. Follow workspace AGENTS.md instructions that apply to the files being worked on."
+    }
+  ]
+}

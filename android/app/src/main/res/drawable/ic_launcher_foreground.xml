@@ -1,0 +1,6 @@
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 原始图片居中放在安全区域；center the unmodified image inside the adaptive icon safe area. -->
+    <item android:width="66dp" android:height="66dp" android:gravity="center">
+        <bitmap android:src="@drawable/daxqo_app_icon" android:gravity="fill" android:filter="true" />
+    </item>
+</layer-list>
