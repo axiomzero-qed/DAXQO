@@ -49,7 +49,7 @@ V0.3 真机结果和未完成项目见[V0.3 验收记录](docs/V0.3-ACCEPTANCE.m
 
 ## V0.4 当前开发 / Current V0.4 development
 
-V0.4 在现有手机 Linux 环境上增加原生手机控制及邮件远程控制入口。辅助功能默认关闭，须由用户在 Android 系统设置中手动授权；远程邮件需要单独配置邮箱和可信联系人。联系人获得的是 Harness 权限，并非隔离沙箱权限。已验证签名 `submit` 邮件触发一次本地 `android_status` 查询并收到已验签的状态回信；当时控制保护处于暂停，完整视觉任务仍待验收。详见[V0.4 指南](docs/V0.4.md)。V0.4 当前源码可构建；V0.3 release 不是 V0.4 APK。
+V0.4 在现有手机 Linux 环境上增加原生手机控制及邮件远程控制入口。辅助功能默认关闭，须由用户在 Android 系统设置中手动授权；远程邮件需要单独配置邮箱和可信联系人。联系人获得的是 Harness 权限，并非隔离沙箱权限。已在真机完成签名 Gmail 命令→本地视觉任务（20+22=42）→签名回信的闭环；设备与启动行为限制见[V0.4 指南](docs/V0.4.md)。V0.4 当前源码可构建；V0.3 release 不是 V0.4 APK。
 
 ## 仓库结构
 
@@ -125,7 +125,7 @@ See the [V0.3 acceptance record](docs/V0.3-ACCEPTANCE.md) for device results and
 
 ### Current V0.4 development
 
-V0.4 adds native phone control and an email remote-control entry point on top of the existing phone Linux environment. Accessibility is off by default and must be enabled manually in Android system settings. Email control requires separate mailbox and trusted-contact configuration. A trusted contact receives Harness permissions, not an isolated sandbox. A signed `submit` email was verified to trigger one local `android_status` query and return a signed, verified status reply; control protection was paused at the time, so the full visual task remains pending. See the [V0.4 guide](docs/V0.4.md). The current V0.4 source can be built; the V0.3 release is not a V0.4 APK.
+V0.4 adds native phone control and an email remote-control entry point on top of the existing phone Linux environment. Accessibility is off by default and must be enabled manually in Android system settings. Email control requires separate mailbox and trusted-contact configuration. A trusted contact receives Harness permissions, not an isolated sandbox. The complete signed Gmail command → local visual task (20+22=42) → signed reply loop has passed on the device; device and app-launch limitations are documented in the [V0.4 guide](docs/V0.4.md). The current V0.4 source can be built; the V0.3 release is not a V0.4 APK.
 
 ### Repository layout
 
