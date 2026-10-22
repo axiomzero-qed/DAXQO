@@ -198,6 +198,8 @@ class MailControlTests(unittest.TestCase):
         msg = smtp.sent[0]
         self.assertEqual(msg["To"], "owner@example.org")
         self.assertEqual(msg["From"], "device@example.net")
+        self.assertEqual(msg["Content-Transfer-Encoding"], "base64")
+        self.assertNotIn(" ", msg.get_content())
         signed = json.loads(msg.get_content())
         report = verify(signed, self.secret)
         self.assertEqual(report["action"], "result")

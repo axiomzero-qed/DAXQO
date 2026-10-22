@@ -1,4 +1,7 @@
 import datetime as dt
+from email.message import EmailMessage
+from email.parser import BytesParser
+from email import policy
 import hashlib
 import hmac
 import json
@@ -15,7 +18,7 @@ if not SCRIPT.is_file():
     SCRIPT = Path(__file__).resolve().with_name("remote_email_mcp.py")
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "scripts"))
-from remote_protocol import canonical, sign, verify  # noqa: E402
+from remote_protocol import canonical, mail_payload_text, sign, verify  # noqa: E402
 from remote_email_mcp import RemoteEmailMCP, load_config, make_payload, serve_stdio  # noqa: E402
 
 SECRET = "synthetic-test-secret-that-is-not-a-real-credential"
@@ -97,6 +100,31 @@ class RemoteProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             verify(sign(payload("result", report=big), SECRET), SECRET, now=NOW)
 
+    def test_mail_json_survives_mime_and_space_wrapping_at_max_prompt(self):
+        prompt = "Hello from Gmail, 你好！\nThis line has spaces; JSON carries them escaped."
+        signed = sign(payload(prompt=prompt), SECRET)
+        wire_text = mail_payload_text(signed)
+        self.assertNotIn(" ", wire_text)
+        # A gateway that inserts CRLF at literal ASCII spaces has no wire-space to alter.
+        hard_wrapped = wire_text.replace(" ", "\r\n")
+        self.assertEqual(hard_wrapped, wire_text)
+
+        message = EmailMessage()
+        message.set_content(hard_wrapped, subtype="plain", charset="utf-8", cte="base64")
+        parsed = BytesParser(policy=policy.default).parsebytes(message.as_bytes())
+        received = json.loads(parsed.get_content())
+        verified = verify(received, SECRET, now=NOW)
+        self.assertEqual(verified["prompt"], prompt)
+
+        boundary = sign(payload(prompt=" " * 8000), SECRET)
+        boundary_text = mail_payload_text(boundary)
+        self.assertLessEqual(len(boundary_text.encode("utf-8")), 64 * 1024)
+        boundary_message = EmailMessage()
+        boundary_message.set_content(boundary_text, subtype="plain", charset="utf-8", cte="base64")
+        boundary_wire = boundary_message.as_bytes()
+        self.assertLessEqual(len(boundary_wire), 96 * 1024)
+        self.assertEqual(verify(json.loads(BytesParser(policy=policy.default).parsebytes(boundary_wire).get_content()), SECRET, now=NOW)["prompt"], " " * 8000)
+
     def test_timestamp_utc_overflow_is_a_validation_error(self):
         for timestamp in ("0001-01-01T00:00:00+23:59", "9999-12-31T23:59:59-23:59"):
             with self.subTest(timestamp=timestamp):
@@ -115,7 +143,7 @@ class RemoteEmailTests(unittest.TestCase):
         self.client = RemoteEmailMCP(self.config, smtp_factory=FakeSMTP)
 
     def test_tool_sends_signed_email_and_only_reports_smtp_acceptance(self):
-        result = self.client.call("remote_submit", {"prompt": "分析本地报告", "title": "测试"})
+        result = self.client.call("remote_submit", {"prompt": "分析 local report\n第二行", "title": "本地测试"})
         smtp = FakeSMTP.instances[-1]
         self.assertEqual((smtp.host, smtp.port), ("smtp.example.net", 465))
         self.assertEqual(smtp.logged_in, ("synthetic-user", "synthetic-password"))
@@ -125,7 +153,9 @@ class RemoteEmailTests(unittest.TestCase):
         self.assertEqual(email["Subject"], "DAXQO/1 " + result["nonce"])
         signed = json.loads(email.get_content())
         verified = verify(signed, SECRET)
-        self.assertEqual((verified["action"], verified["prompt"], verified["title"]), ("submit", "分析本地报告", "测试"))
+        self.assertEqual((verified["action"], verified["prompt"], verified["title"]), ("submit", "分析 local report\n第二行", "本地测试"))
+        self.assertEqual(email["Content-Transfer-Encoding"], "base64")
+        self.assertNotIn(" ", email.get_content())
         self.assertEqual(result["delivery"], "sent")
         self.assertIn("unconfirmed", result["notice"])
         self.assertNotIn("completed", result["notice"])
@@ -188,11 +218,12 @@ class RemoteEmailTests(unittest.TestCase):
             path.write_text(json.dumps(cfg), encoding="utf-8")
             if os.name != "nt":
                 path.chmod(0o600)
-            proc = subprocess.run([sys.executable, str(SCRIPT), "--config", str(path), "--print-command", "submit", "--prompt", "fixture"], capture_output=True, text=True)
+            proc = subprocess.run([sys.executable, str(SCRIPT), "--config", str(path), "--print-command", "submit", "--prompt", "fixture text"], capture_output=True, text=True)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertNotIn(SECRET, proc.stdout)
             signed = json.loads(proc.stdout)
-            self.assertEqual(verify(signed, SECRET)["prompt"], "fixture")
+            self.assertNotIn(" ", proc.stdout)
+            self.assertEqual(verify(signed, SECRET)["prompt"], "fixture text")
 
 
 if __name__ == "__main__":

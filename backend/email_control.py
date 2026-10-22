@@ -18,10 +18,10 @@ import stat
 import threading
 import uuid
 
-from remote_protocol import normalize_email, sign, verify
+from remote_protocol import mail_payload_text, normalize_email, sign, verify
 
 MAX_MESSAGE = 96 * 1024
-MAX_JSON = 32 * 1024
+MAX_JSON = 64 * 1024
 POLL_SECONDS = 15
 DEFAULT_IMAP = "imap.163.com"
 DEFAULT_SMTP = "smtp.163.com"
@@ -514,7 +514,7 @@ class MailControlService:
         message["To"] = contact["email"]  # recipient always comes from the trusted contact row
         message["Subject"] = "DAXQO/1 " + payload["nonce"]
         message["Message-ID"] = make_msgid()
-        message.set_content(_safe_json(payload).decode("utf-8"))
+        message.set_content(mail_payload_text(payload), subtype="plain", charset="utf-8", cte="base64")
         try:
             with smtplib.SMTP_SSL(config["smtpHost"], 465, context=ssl.create_default_context(), timeout=15) as smtp:
                 smtp.login(config["username"], config["password"])

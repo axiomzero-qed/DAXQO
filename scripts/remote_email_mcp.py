@@ -18,7 +18,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
-from remote_protocol import normalize_email, sign, verify  # noqa: E402
+from remote_protocol import mail_payload_text, normalize_email, sign, verify  # noqa: E402
 
 MAX_LINE = 1024 * 1024
 CONFIG_KEYS = {"deviceEmail", "contactEmail", "contactSecret", "smtpHost", "smtpPort", "username", "password"}
@@ -93,7 +93,7 @@ class RemoteEmailMCP:
         message["To"] = self.config["deviceEmail"]
         message["Subject"] = "DAXQO/1 " + payload["nonce"]
         message["Message-ID"] = make_msgid()
-        message.set_content(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+        message.set_content(mail_payload_text(payload), subtype="plain", charset="utf-8", cte="base64")
         try:
             with self.smtp_factory(
                 self.config["smtpHost"], 465,
@@ -213,7 +213,7 @@ def _print_command(config: dict, args) -> None:
     elif args.command == "result":
         fields["report"] = json.loads(args.report)
     payload = make_payload(config, args.command, fields)
-    sys.stdout.write(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n")
+    sys.stdout.write(mail_payload_text(payload) + "\n")
 
 
 def main(argv=None) -> int:

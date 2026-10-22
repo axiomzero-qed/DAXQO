@@ -38,6 +38,19 @@ def canonical(payload: dict) -> bytes:
     return _json_bytes({key: value for key, value in payload.items() if key != "signature"})
 
 
+def mail_payload_text(payload: dict) -> str:
+    """Serialize JSON safely for mail transports that hard-wrap literal spaces.
+
+    Escaping U+0020 as a JSON escape preserves the decoded payload and signature,
+    while leaving no ASCII spaces for mail gateways to use as wrap points.
+    """
+    try:
+        text = _json_bytes(payload).decode("utf-8")
+    except ValueError:
+        raise ValueError("Invalid remote command payload") from None
+    return text.replace(" ", "\\u0020")
+
+
 def _secret_bytes(secret: str) -> bytes:
     if not isinstance(secret, str) or not secret or len(secret) > 512:
         raise ValueError("Invalid remote command signature")
