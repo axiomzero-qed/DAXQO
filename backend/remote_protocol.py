@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import re
+import uuid
 from typing import Any
 
 UTC = dt.timezone.utc
@@ -20,6 +21,8 @@ ACTION_FIELDS = {
     "submit": {"prompt", "title"},
     "status": {"taskId"},
     "stop": {"taskId"},
+    "approve": {"taskId", "approvalId"},
+    "decline": {"taskId", "approvalId"},
     "result": {"report"},
 }
 
@@ -139,6 +142,16 @@ def _validate_fields(payload: dict) -> None:
     elif action == "stop":
         if not _valid_task_id(payload.get("taskId")):
             raise ValueError("Remote stop requires a valid task ID")
+    elif action in ("approve", "decline"):
+        if not _valid_task_id(payload.get("taskId")):
+            raise ValueError("Approval decision requires a valid task ID")
+        approval_id = payload.get("approvalId")
+        try:
+            valid_approval_id = isinstance(approval_id, str) and str(uuid.UUID(approval_id)) == approval_id.lower()
+        except (ValueError, AttributeError):
+            valid_approval_id = False
+        if not valid_approval_id:
+            raise ValueError("Approval decision requires a complete approval ID")
     elif action == "result":
         report = payload.get("report")
         if not isinstance(report, dict) or len(_json_bytes(report)) > MAX_REPORT_JSON:

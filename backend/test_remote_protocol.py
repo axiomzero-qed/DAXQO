@@ -99,6 +99,16 @@ class RemoteProtocolTests(unittest.TestCase):
         big = {"x": "a" * 8100}
         with self.assertRaises(ValueError):
             verify(sign(payload("result", report=big), SECRET), SECRET, now=NOW)
+        approval_id = "12345678-1234-1234-1234-123456789abc"
+        for action in ("approve", "decline"):
+            decision = sign(payload(action, taskId="task_123", approvalId=approval_id), SECRET)
+            self.assertEqual(verify(decision, SECRET, now=NOW)["approvalId"], approval_id)
+        for fields in ({"taskId": "task_123"}, {"approvalId": approval_id},
+                       {"taskId": "task_123", "approvalId": "1234"}):
+            with self.assertRaises(ValueError):
+                verify(sign(payload("approve", **fields), SECRET), SECRET, now=NOW)
+        with self.assertRaises(ValueError):
+            verify(sign(payload("approve", taskId="task_123", approvalId=approval_id, prompt="extra"), SECRET), SECRET, now=NOW)
 
     def test_mail_json_survives_mime_and_space_wrapping_at_max_prompt(self):
         prompt = "Hello from Gmail, 你好！\nThis line has spaces; JSON carries them escaped."
@@ -168,6 +178,16 @@ class RemoteEmailTests(unittest.TestCase):
         self.client.call("remote_stop", {"taskId": "task_123"})
         self.assertEqual(json.loads(FakeSMTP.instances[-1].sent[0].get_content())["action"], "stop")
 
+    def test_signed_approval_tools_require_and_send_both_ids(self):
+        approval_id = "12345678-1234-1234-1234-123456789abc"
+        for tool, action in (("remote_approve", "approve"), ("remote_decline", "decline")):
+            result = self.client.call(tool, {"taskId": "task_123", "approvalId": approval_id})
+            sent = json.loads(FakeSMTP.instances[-1].sent[0].get_content())
+            self.assertEqual((sent["action"], sent["taskId"], sent["approvalId"]), (action, "task_123", approval_id))
+            self.assertEqual(result["delivery"], "sent")
+        for args in ({"taskId": "task_123"}, {"approvalId": approval_id}):
+            with self.assertRaises(ValueError): self.client.call("remote_approve", args)
+
     def test_failure_is_error_not_automatic_retry(self):
         class Broken(FakeSMTP):
             def send_message(self, message):
@@ -208,7 +228,7 @@ class RemoteEmailTests(unittest.TestCase):
         serve_stdio(self.client, io.StringIO("\n".join(map(json.dumps, requests)) + "\n"), output)
         responses = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "daxqo-remote-email")
-        self.assertEqual({t["name"] for t in responses[1]["result"]["tools"]}, {"remote_submit", "remote_status", "remote_stop"})
+        self.assertEqual({t["name"] for t in responses[1]["result"]["tools"]}, {"remote_submit", "remote_status", "remote_stop", "remote_approve", "remote_decline"})
         self.assertFalse(responses[2]["result"]["isError"])
 
     def test_print_command_excludes_secret_and_needs_no_smtp(self):

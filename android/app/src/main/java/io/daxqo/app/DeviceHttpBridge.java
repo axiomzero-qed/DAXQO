@@ -86,7 +86,9 @@ final class DeviceHttpBridge {
             String supplied = headers.get("authorization");
             if (cap.length() < 32 || supplied == null || !MessageDigest.isEqual(("Bearer " + cap).getBytes(StandardCharsets.UTF_8), supplied.getBytes(StandardCharsets.UTF_8))) { reply(client, 401, error("unauthorized", "本机服务尚未配对或认证失败")); return; }
             if ("GET".equals(start[0]) && "/api/device/status".equals(start[1])) { reply(client, 200, DeviceState.status(service)); return; }
-            if (!"POST".equals(start[0]) || !"/api/device/execute".equals(start[1])) { reply(client, 404, error("not_found", "接口不存在")); return; }
+            if ("GET".equals(start[0]) && "/api/device/approvals".equals(start[1])) { reply(client, 200, new JSONObject().put("approvals", DeviceState.approvalList())); return; }
+            boolean approvalDecision = start[1].matches("/api/device/approvals/[a-fA-F0-9-]{36}");
+            if (!"POST".equals(start[0]) || (!"/api/device/execute".equals(start[1]) && !approvalDecision)) { reply(client, 404, error("not_found", "接口不存在")); return; }
             String mime = headers.get("content-type");
             if (mime == null || !mime.toLowerCase(Locale.ROOT).matches("application/json(?:\\s*;.*)?")) { reply(client, 415, error("invalid_request", "请求必须使用JSON格式")); return; }
             int length;
@@ -103,6 +105,11 @@ final class DeviceHttpBridge {
             JSONObject request;
             try { request = new JSONObject(new String(bytes, StandardCharsets.UTF_8)); }
             catch (Exception ignored) { reply(client, 400, error("invalid_request", "JSON格式无效")); return; }
+            if (approvalDecision) {
+                String approvalId = start[1].substring("/api/device/approvals/".length());
+                reply(client, 200, service.decideApproval(approvalId, request.optString("decision", "")));
+                return;
+            }
             String id = request.optString("id", "");
             if (id.isEmpty() || id.length() > 128 || !(request.opt("action") instanceof String) || (request.has("args") && !(request.opt("args") instanceof JSONObject))) { reply(client, 400, DeviceAccessibilityService.failure(id, "invalid_args", "请提供id、action和对象格式args")); return; }
             JSONObject response;

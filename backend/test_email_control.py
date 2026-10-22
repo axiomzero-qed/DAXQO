@@ -11,6 +11,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 import uuid
@@ -42,6 +43,8 @@ class FakeHarness:
         self.store = Store(self.state / "harness.sqlite3")
         self.start_calls = []
         self.stop_calls = []
+        self.permission_approvals = []
+        self.permission_decisions = []
 
     def safe_text(self, value, limit=10000):
         return str(value)[:limit]
@@ -57,6 +60,16 @@ class FakeHarness:
     def stop(self, task_id):
         self.stop_calls.append(task_id)
         return {"id": task_id}
+
+    def android_permission_approvals(self, task_id=None):
+        return [dict(item) for item in self.permission_approvals if task_id is None or item.get("taskId") == task_id]
+
+    def decide_android_permission(self, approval_id, decision, *, task_id=None):
+        item = next((item for item in self.permission_approvals if item["id"] == approval_id and item["taskId"] == task_id), None)
+        if not item or item["status"] != "pending": raise ValueError("Approval is no longer pending")
+        self.permission_decisions.append((approval_id, decision, task_id))
+        item["status"] = "approved" if decision == "accept" else "declined"
+        return {"id": approval_id, "taskId": task_id, "status": item["status"]}
 
 
 class FakeSMTP:
@@ -197,6 +210,22 @@ class MailControlTests(unittest.TestCase):
         self.assertEqual(denial["report"]["status"], "rejected")
         self.assertNotIn(task_id, json.dumps(denial["report"]))
 
+    def test_stop_covers_waiting_approval_and_blocked_system(self):
+        task_ids = []
+        with patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            for index, status in enumerate(("running", "waiting_approval", "blocked_system")):
+                task_id = self.harness.start_task({"prompt": "stop fixture " + str(index)})["id"]
+                task_ids.append(task_id)
+                with self.harness.store.lock, self.harness.store.db:
+                    self.harness.store.db.execute("UPDATE tasks SET status=? WHERE id=?", (status, task_id))
+                    self.harness.store.db.execute(
+                        "INSERT INTO mail_commands(id,contact_id,nonce,action,task_id,status,received_at) VALUES(?,?,?,?,?,?,?)",
+                        (str(uuid.uuid4()), self.contact["id"], "owned_stop_nonce_" + str(index).zfill(16),
+                         "submit", task_id, "running", "2026-01-01T00:00:00Z"))
+                raw = self.command_email("stop", taskId=task_id)
+                self.service._process_email(raw)
+        self.assertEqual(self.harness.stop_calls, task_ids)
+
     def test_status_without_task_id_only_lists_callers_tasks(self):
         self.service._process_email(self.command_email(prompt="my task"))
         other = self.service.create_contact({"email": "other@example.org"})
@@ -208,6 +237,74 @@ class MailControlTests(unittest.TestCase):
             self.service._process_email(self.command_email("status"))
         report = verify(json.loads(FakeSMTP.instances[-1].sent[0].get_content()), self.secret)["report"]
         self.assertEqual([row["taskId"] for row in report["tasks"]], ["task_1"])
+
+    def _start_owned_task(self, *, status="running"):
+        self.service._process_email(self.command_email(prompt="my fixture task", nonce=uuid.uuid4().hex))
+        with self.harness.store.lock, self.harness.store.db:
+            self.harness.store.db.execute("UPDATE tasks SET status=? WHERE id='task_1'", (status,))
+        return "task_1"
+
+    def _approval(self, task_id="task_1", *, status="pending", expires_ms=None, approval_id=None):
+        item = {"id": approval_id or str(uuid.uuid4()), "taskId": task_id, "action": "tap Allow",
+                "packageName": "com.example.fixture", "summary": "Approve the requested action",
+                "status": status, "expiresAt": expires_ms or int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000) + 120_000}
+        self.harness.permission_approvals.append(item)
+        return item
+
+    def test_signed_approval_is_task_owned_replay_safe_and_resumes_once(self):
+        self._start_owned_task(status="waiting_approval")
+        approval = self._approval()
+        raw = self.command_email("approve", taskId="task_1", approvalId=approval["id"], nonce="approval_nonce_000000000001")
+        with patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._process_email(raw)
+            self.service._process_email(raw)
+        self.assertEqual(self.harness.permission_decisions, [(approval["id"], "accept", "task_1")])
+        report = verify(json.loads(FakeSMTP.instances[-1].sent[0].get_content()), self.secret)["report"]
+        self.assertEqual((report["action"], report["approvalId"], report["status"]), ("approve", approval["id"], "approved"))
+
+    def test_signed_approval_rejects_cross_contact_and_expired_ids(self):
+        self._start_owned_task(status="waiting_approval")
+        approval = self._approval()
+        other = self.service.create_contact({"email": "other@example.org"})
+        raw = self.command_email("approve", sender="other@example.org", contact="other@example.org",
+            secret=other["pairingSecret"], taskId="task_1", approvalId=approval["id"], nonce="foreign_approval_nonce_000001")
+        with patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._process_email(raw)
+        self.assertEqual(self.harness.permission_decisions, [])
+        report = verify(json.loads(FakeSMTP.instances[-1].sent[0].get_content()), other["pairingSecret"])["report"]
+        self.assertEqual(report["status"], "rejected")
+        self.assertNotIn("task_1", json.dumps(report))
+
+        expired = self._approval(expires_ms=int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000) - 1)
+        with patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._process_email(self.command_email("decline", taskId="task_1", approvalId=expired["id"], nonce="expired_approval_nonce_00001"))
+        self.assertEqual(self.harness.permission_decisions, [])
+        report = verify(json.loads(FakeSMTP.instances[-1].sent[0].get_content()), self.secret)["report"]
+        self.assertEqual(report["status"], "rejected")
+
+    def test_waiting_approval_stays_running_and_sends_one_notice_not_completion(self):
+        task_id = self._start_owned_task(status="waiting_approval")
+        approval = self._approval(task_id)
+        with patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._deliver_finished()
+            self.service._deliver_finished()
+        original = next(row for row in self.commands() if row["action"] == "submit")
+        self.assertEqual(original["status"], "running")
+        with self.harness.store.lock:
+            self.assertEqual(self.harness.store.db.execute("SELECT COUNT(*) FROM mail_approval_notices WHERE approval_id=?", (approval["id"],)).fetchone()[0], 1)
+        self.assertEqual(sum(len(smtp.sent) for smtp in FakeSMTP.instances), 1)
+        notice = verify(json.loads(FakeSMTP.instances[0].sent[0].get_content()), self.secret)["report"]
+        self.assertEqual(notice["status"], "waiting_approval")
+        self.assertEqual(notice["approval"]["packageName"], "com.example.fixture")
+        self.assertIn("确认 " + approval["id"], json.dumps(notice, ensure_ascii=False))
+
+    def test_status_reports_waiting_approval_as_nonterminal(self):
+        self._start_owned_task(status="waiting_approval")
+        with patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._process_email(self.command_email("status", taskId="task_1"))
+        report = verify(json.loads(FakeSMTP.instances[-1].sent[0].get_content()), self.secret)["report"]
+        self.assertEqual(report["status"], "waiting_approval")
+        self.assertNotIn("result", report)
 
     def test_uncertain_smtp_reply_is_never_automatically_retried(self):
         self.service._process_email(self.command_email(prompt="fixture"))
@@ -693,6 +790,13 @@ class PlainEmailAuthenticationTests(unittest.TestCase):
         with self.harness.store.lock:
             return [dict(row) for row in self.harness.store.db.execute("SELECT * FROM mail_commands ORDER BY received_at")]
 
+    def _approval(self, task_id="task_1"):
+        item = {"id": str(uuid.uuid4()), "taskId": task_id, "action": "tap Allow",
+                "packageName": "com.example.fixture", "summary": "Approve fixture action",
+                "status": "pending", "expiresAt": int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000) + 120_000}
+        self.harness.permission_approvals.append(item)
+        return item
+
     def signed_email(self, *, body="please process this fixture", subject="Fixture request", sender="owner@gmail.com",
                      receiver="device@example.net", date=None, include_headers=None, length=False, body_type="plain",
                      attachment=False):
@@ -703,9 +807,11 @@ class PlainEmailAuthenticationTests(unittest.TestCase):
         message["Date"] = format_datetime(date or self.now)
         message["Message-ID"] = f"<{uuid.uuid4()}@gmail.com>"
         if body_type == "plain":
-            message.set_content(body, cte="7bit")
+            message.set_content(body, charset="utf-8", cte="quoted-printable")
         elif body_type == "html":
-            message.set_content(body, subtype="html", cte="7bit")
+            message.set_content(body, subtype="html", charset="utf-8", cte="quoted-printable")
+        elif body_type == "empty-multipart":
+            message.set_type("multipart/alternative")
         if attachment:
             message.add_attachment(b"fixture attachment", maintype="application", subtype="octet-stream", filename="fixture.bin")
         raw = message.as_bytes(policy=policy.SMTP)
@@ -731,6 +837,179 @@ class PlainEmailAuthenticationTests(unittest.TestCase):
         self.assertIn("邮件主题：Check the report", result["prompt"])
         self.assertIn("Please review the local fixture.", result["prompt"])
         self.assertTrue(result["messageId"].startswith("<"))
+
+    def test_empty_body_falls_back_to_authenticated_subject_but_nonempty_body_wins(self):
+        title = "请检查下载目录中的报告"
+        empty = self.verify_fixture(self.signed_email(body=" \n\t", subject=title))
+        self.assertEqual((empty["action"], empty["title"], empty["prompt"]),
+                         ("submit", title, "邮件主题：" + title))
+        no_body_part = self.verify_fixture(self.signed_email(body_type="empty-multipart", subject=title))
+        self.assertEqual(no_body_part["prompt"], "邮件主题：" + title)
+        empty_html = self.verify_fixture(self.signed_email(body="<html><body> \n&nbsp; </body></html>",
+                                                            body_type="html", subject="HTML 空白"))
+        self.assertEqual(empty_html["prompt"], "邮件主题：HTML 空白")
+        multilingual = self.verify_fixture(self.signed_email(body="", subject="给手机：请整理下载文件"))
+        self.assertEqual(multilingual["prompt"], "邮件主题：给手机：请整理下载文件")
+        body = self.verify_fixture(self.signed_email(body="正文中的任务指令优先", subject="普通主题"))
+        self.assertEqual(body["action"], "submit")
+        self.assertIn("邮件主题：普通主题", body["prompt"])
+        self.assertIn("正文中的任务指令优先", body["prompt"])
+        self.assertNotEqual(body["prompt"], body["title"])
+        for subject in ("确认 12345678-1234-1234-1234-123456789abc", "Re: 确认安装！", "Fwd: 我确认需要安装，你来点确认"):
+            with self.subTest(subject=subject):
+                result = self.verify_fixture(self.signed_email(body=" \n", subject=subject))
+                self.assertEqual(result["action"], "approval_help")
+                self.assertNotIn("approvalId", result)
+        self.enable_plain()
+        since = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        task_mail = self.signed_email(body="  ", subject=title, date=since + dt.timedelta(seconds=1))
+        contact = {**self.contact, "email": "owner@gmail.com", "plain_since": None}
+        verifier = lambda *a, **kw: _verify_plain_email(*a, dnsfunc=self.dnsfunc, **kw)
+        with patch("email_control._verify_plain_email", side_effect=verifier), patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._process_plain_email(task_mail, contact, "fixture-title-only")
+        self.assertEqual(len(self.harness.start_calls), 1)
+        self.assertTrue(self.harness.start_calls[0]["prompt"].endswith(title))
+
+    def test_long_task_subject_is_preserved_and_prompt_limit_rejects(self):
+        long_subject = "请检查文件" * 45 + "最后请保留此尾部指令"
+        result = self.verify_fixture(self.signed_email(body="", subject=long_subject))
+        self.assertEqual(result["subject"], long_subject)
+        self.assertTrue(result["prompt"].endswith("邮件主题：" + long_subject))
+        self.assertIn("最后请保留此尾部指令", result["prompt"])
+        self.assertEqual(result["title"], long_subject[:100])
+
+        oversized = self.signed_email(body="", subject="任务" * 4100)
+        with self.assertRaisesRegex(ValueError, "8000字"):
+            self.verify_fixture(oversized)
+
+    def test_dkim_verified_first_line_only_parses_full_approval_id(self):
+        approval_id = str(uuid.uuid4())
+        accepted = self.verify_fixture(self.signed_email(body="\n确认 " + approval_id + "\n> 拒绝 " + approval_id))
+        self.assertEqual((accepted["action"], accepted["approvalId"]), ("approve", approval_id))
+        rejected = self.verify_fixture(self.signed_email(body="拒绝 " + approval_id + "\nquoted text"))
+        self.assertEqual((rejected["action"], rejected["approvalId"]), ("decline", approval_id))
+        ambiguous = self.verify_fixture(self.signed_email(body="确认\n\n> 确认 " + approval_id))
+        self.assertEqual(ambiguous["action"], "approve_unambiguous")
+        self.assertIsNone(ambiguous["approvalId"])
+        unsafe = self.verify_fixture(self.signed_email(body="确认不要安装"))
+        self.assertEqual(unsafe["action"], "approval_help")
+        not_exact = self.verify_fixture(self.signed_email(body="我确认需要安装，你来点确认，但目标不对"))
+        self.assertEqual(not_exact["action"], "approval_help")
+        ordinary = self.verify_fixture(self.signed_email(body="Please do a task.\n\n> 确认 " + approval_id))
+        self.assertEqual(ordinary["action"], "submit")
+
+    def test_dkim_verified_email_decides_owned_approval_and_missing_id_never_launches(self):
+        self.enable_plain()
+        start = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        submit = self.signed_email(body="A harmless original task.", subject="Original task", date=start + dt.timedelta(seconds=1))
+        with patch("email_control._verify_plain_email", side_effect=lambda *a, **kw: _verify_plain_email(*a, dnsfunc=self.dnsfunc, **kw)), \
+             patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._process_plain_email(submit, {**self.contact, "email": "owner@gmail.com", "plain_since": None}, "fixture-original-header")
+        FakeSMTP.instances.clear()
+        with self.harness.store.lock, self.harness.store.db:
+            self.harness.store.db.execute("UPDATE tasks SET status='waiting_approval' WHERE id='task_1'")
+        approval = self._approval()
+        self._approval()  # Ambiguous short confirmations cannot choose between two pending requests.
+        confirmation = self.signed_email(body="\n确认 " + approval["id"] + "\n\n> old quoted text",
+            subject="Re: Original task", date=start + dt.timedelta(seconds=2))
+        no_id = self.signed_email(body="确认", subject="Re: Original task", date=start + dt.timedelta(seconds=3))
+        verifier = lambda *a, **kw: _verify_plain_email(*a, dnsfunc=self.dnsfunc, **kw)
+        contact = {**self.contact, "email": "owner@gmail.com", "plain_since": None}
+        with patch("email_control._verify_plain_email", side_effect=verifier), patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._process_plain_email(no_id, contact, "fixture-no-id")
+            self.service._process_plain_email(confirmation, contact, "fixture-approval")
+        self.assertEqual(len(self.harness.start_calls), 1)
+        self.assertEqual(self.harness.permission_decisions, [(approval["id"], "accept", "task_1")])
+        self.assertEqual(len(FakeSMTP.instances), 2)
+        no_id_report = BytesParser(policy=policy.default).parsebytes(FakeSMTP.instances[0].sent[0].as_bytes()).get_content()
+        self.assertIn("确认 <审批ID>", no_id_report)
+        self.assertEqual(FakeSMTP.instances[1].sent[0]["To"], "owner@gmail.com")
+
+    def test_exact_short_confirmation_accepts_only_one_owned_unexpired_approval(self):
+        self.enable_plain()
+        start = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        submit = self.signed_email(body="Original task.", date=start + dt.timedelta(seconds=1))
+        verifier = lambda *a, **kw: _verify_plain_email(*a, dnsfunc=self.dnsfunc, **kw)
+        contact = {**self.contact, "email": "owner@gmail.com", "plain_since": None}
+        with patch("email_control._verify_plain_email", side_effect=verifier), patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._process_plain_email(submit, contact, "fixture-single-owner-task")
+        FakeSMTP.instances.clear()
+        with self.harness.store.lock, self.harness.store.db:
+            self.harness.store.db.execute("UPDATE tasks SET status='waiting_approval' WHERE id='task_1'")
+        approval = self._approval()
+        short = self.signed_email(body="我确认需要安装，你来点确认！", date=start + dt.timedelta(seconds=2))
+        with patch("email_control._verify_plain_email", side_effect=verifier), patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._process_plain_email(short, contact, "fixture-short-confirmation")
+        self.assertEqual(self.harness.permission_decisions, [(approval["id"], "accept", "task_1")])
+        self.assertEqual(len(self.harness.start_calls), 1)
+
+    def test_approval_decision_does_not_hold_store_lock_and_keeps_auth_lock(self):
+        self.enable_plain()
+        start = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        verifier = lambda *a, **kw: _verify_plain_email(*a, dnsfunc=self.dnsfunc, **kw)
+        contact = {**self.contact, "email": "owner@gmail.com", "plain_since": None}
+        submit = self.signed_email(body="Original task.", date=start + dt.timedelta(seconds=1))
+        with patch("email_control._verify_plain_email", side_effect=verifier), patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._process_plain_email(submit, contact, "fixture-lock-submit")
+        with self.harness.store.lock, self.harness.store.db:
+            self.harness.store.db.execute("UPDATE tasks SET status='waiting_approval' WHERE id='task_1'")
+        approval = self._approval()
+        original_decide = self.harness.decide_android_permission
+        probe_state = {}
+
+        def guarded_decide(approval_id, decision, *, task_id=None):
+            store_acquired = threading.Event()
+            def take_store_lock():
+                with self.harness.store.lock:
+                    store_acquired.set()
+            store_probe = threading.Thread(target=take_store_lock)
+            store_probe.start()
+            store_probe.join(1)
+            probe_state["store_free"] = store_acquired.is_set()
+
+            auth_acquired = threading.Event()
+            def take_auth_lock():
+                with self.service._auth_lock:
+                    auth_acquired.set()
+            auth_probe = threading.Thread(target=take_auth_lock)
+            auth_probe.start()
+            auth_probe.join(0.05)
+            probe_state["auth_serialized"] = not auth_acquired.is_set()
+            auth_probe.join(1)
+            store_probe.join(1)
+            return original_decide(approval_id, decision, task_id=task_id)
+
+        self.harness.decide_android_permission = guarded_decide
+        confirmation = self.signed_email(body="确认 " + approval["id"], date=start + dt.timedelta(seconds=2))
+        with patch("email_control._verify_plain_email", side_effect=verifier), patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._process_plain_email(confirmation, contact, "fixture-lock-approval")
+        self.assertTrue(probe_state.get("store_free"), "store lock must be released before entering the harness")
+        self.assertTrue(probe_state.get("auth_serialized"), "contact revocation must serialize with approval dispatch")
+        self.assertEqual(self.harness.permission_decisions, [(approval["id"], "accept", "task_1")])
+
+    def test_waiting_approval_notice_to_gmail_is_readable_and_sent_once(self):
+        self.enable_plain()
+        start = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        submit = self.signed_email(body="Original task.", date=start + dt.timedelta(seconds=1))
+        verifier = lambda *a, **kw: _verify_plain_email(*a, dnsfunc=self.dnsfunc, **kw)
+        contact = {**self.contact, "email": "owner@gmail.com", "plain_since": None}
+        with patch("email_control._verify_plain_email", side_effect=verifier), patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._process_plain_email(submit, contact, "fixture-notice-submit")
+        FakeSMTP.instances.clear()
+        with self.harness.store.lock, self.harness.store.db:
+            self.harness.store.db.execute("UPDATE tasks SET status='waiting_approval' WHERE id='task_1'")
+        approval = self._approval()
+        with patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._deliver_finished()
+            self.service._deliver_finished()
+        self.assertEqual(len(FakeSMTP.instances), 1)
+        notice = FakeSMTP.instances[0].sent[0]
+        self.assertEqual(notice["To"], "owner@gmail.com")
+        body = notice.get_content()
+        for expected in ("tap Allow", "com.example.fixture", approval["id"], "确认 " + approval["id"], "2026-"):
+            self.assertIn(expected, body)
+        original = next(row for row in self.commands() if row["action"] == "submit")
+        self.assertEqual(original["status"], "running")
 
     def test_forged_authentication_results_and_tampered_fields_are_rejected(self):
         unsigned = EmailMessage()

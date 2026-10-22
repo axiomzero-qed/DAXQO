@@ -49,9 +49,9 @@ V0.3 真机结果和未完成项目见[V0.3 验收记录](docs/V0.3-ACCEPTANCE.m
 
 ## V0.4 当前开发 / Current V0.4 development
 
-V0.4 在现有手机 Linux 环境上增加原生手机控制及邮件远程控制入口。辅助功能默认关闭，须由用户在 Android 系统设置中手动授权；远程邮件需要单独配置邮箱和可信联系人。联系人获得的是 Harness 权限，并非隔离沙箱权限。已在真机完成签名 Gmail 命令→本地视觉任务（20+22=42）→签名回信的闭环；设备与启动行为限制见[V0.4 指南](docs/V0.4.md)。V0.4 当前源码可构建；V0.3 release 不是 V0.4 APK。
+V0.4 在现有手机 Linux 环境上增加原生手机控制及邮件远程控制入口。手机控制提供默认 `confirm` 和 `full` 模式；`full` 只允许 DAXQO 尝试 Android 已许可的操作，不会提升系统权限。`confirm` 下敏感写操作需一次性批准，可在 App 审批卡或可信邮箱确认，批准后原任务自动继续。网页仅显示模式，不切换模式；请在手机顶栏“手机控制”页设置。辅助功能默认关闭，远程邮件需单独配置邮箱和联系人。可信联系人拥有 Harness 权限，并非隔离沙箱。邮件审批和息屏续跑闭环已在真机通过，验收范围仅为 Settings App info 的 Back；其他设置、安装权限点击和支付未测试。设备限制见[V0.4 指南](docs/V0.4.md)。V0.4 当前源码可构建；V0.3 release 不是 V0.4 APK。
 
-普通 Gmail 邮件也可直接提交新任务：在本机启用后，已登记联系人的邮件经完整 DKIM 验证自动执行，并回传可读接单与结果邮件。此流程已在真机验证；默认关闭，仅处理启用后的新邮件。
+启用普通 Gmail 后，已登记联系人通过完整 DKIM 验证的新邮件可提交任务；主题和正文一同作为任务输入，正文为空时用主题。敏感手机写操作会等待一次确认，可在 App 审批卡或可信邮箱按正文首行回复 `确认 <UUID>` / `拒绝 <UUID>`；唯一一项有效待批时可仅回复 `确认`，不能只用主题确认。附件邮件整封拒绝。2026-10-23 04:04:57–04:06:18 的真实验收中，纯标题来信创建任务，确认后同一 thread 息屏唤醒并消费原审批，Settings App info 页 Back 执行一次，任务完成且最终回信送达；其他设置、安装权限点击和支付未测试。现有身份验证、DKIM 与防重放校验保持不变。
 
 ## 仓库结构
 
@@ -127,9 +127,9 @@ See the [V0.3 acceptance record](docs/V0.3-ACCEPTANCE.md) for device results and
 
 ### Current V0.4 development
 
-V0.4 adds native phone control and an email remote-control entry point on top of the existing phone Linux environment. Accessibility is off by default and must be enabled manually in Android system settings. Email control requires separate mailbox and trusted-contact configuration. A trusted contact receives Harness permissions, not an isolated sandbox. The complete signed Gmail command → local visual task (20+22=42) → signed reply loop has passed on the device; device and app-launch limitations are documented in the [V0.4 guide](docs/V0.4.md). The current V0.4 source can be built; the V0.3 release is not a V0.4 APK.
+V0.4 adds native phone control and email remote control on the existing phone Linux environment. Phone Control offers default `confirm` and `full` modes; `full` only lets DAXQO attempt actions Android already permits and does not elevate system permissions. In `confirm`, sensitive writes require one-time approval from the app approval card or a trusted mailbox; approval resumes the original task. The web UI displays but cannot change the mode; use Phone Control in the phone app’s top bar. Accessibility remains off by default, and email requires separate mailbox/contact setup. Trusted contacts receive Harness permissions, not an isolated sandbox. The email approval and screen-off continuation loop passed on-device for Back on Android Settings App info. Other settings, installation-permission taps, and payment actions were not tested. See the [V0.4 guide](docs/V0.4.md). Current V0.4 source can be built; the V0.3 release is not a V0.4 APK.
 
-Ordinary Gmail messages can also submit new tasks. Once enabled locally, registered contacts' messages are verified with full DKIM before automatic execution, with readable acknowledgment and result replies. This flow passed on the device; it is off by default and handles only new mail after activation.
+Once ordinary Gmail handling is enabled, new messages from registered contacts that pass full DKIM can submit tasks. Subject and body are combined as task input; a blank body uses the subject alone. Sensitive phone writes wait for one-time approval in the app or through a trusted-mailbox reply whose first body line is `确认 <UUID>` or `拒绝 <UUID>`; bare `确认` is allowed only when exactly one valid approval is pending. The subject alone is never accepted, and messages with attachments are rejected. On 2026-10-23 04:04:57–04:06:18, a subject-only email created a task; approval resumed the same thread while the phone was screen-off, and it consumed the original approval, performed Back on Settings App info, completed, and sent the final report. Other settings, installation-permission taps, and payment actions were not tested. Identity validation, DKIM, and replay protections remain unchanged.
 
 ### Repository layout
 

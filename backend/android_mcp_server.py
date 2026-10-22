@@ -27,9 +27,10 @@ SENSITIVE_KEY = re.compile(r"(?i)(?:capability|authorization|access[_-]?token|re
 
 
 class BridgeError(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, approval: dict | None = None):
         super().__init__(message)
         self.code = code
+        self.approval = _public_value(approval) if isinstance(approval, dict) else None
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -115,8 +116,15 @@ class AndroidBridge:
             raise BridgeError("credentials_unavailable", "DAXQO capability file is unavailable") from None
 
     def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        if path not in ("/api/device/status", "/api/device/execute"):
+        route = (method, path) in (("GET", "/api/device/status"), ("GET", "/api/device/approvals"),
+                                  ("POST", "/api/device/execute"))
+        owner_decision = method == "POST" and re.fullmatch(
+            r"/api/device/approvals/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", path)
+        if not route and not owner_decision:
             raise BridgeError("invalid_request", "Unsupported Android bridge route")
+        if owner_decision and (not isinstance(body, dict) or set(body) != {"decision"}
+                               or body["decision"] not in ("accept", "decline")):
+            raise BridgeError("invalid_request", "An owner approval requires accept or decline")
         raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8") if body is not None else None
         request = urllib.request.Request(self.base + path, data=raw, method=method, headers={
             "Host": f"127.0.0.1:{self.port}",
@@ -164,7 +172,7 @@ class AndroidBridge:
             error = response.get("error") if isinstance(response.get("error"), dict) else {}
             code = error.get("code") if isinstance(error.get("code"), str) else "action_rejected"
             message = error.get("message") if isinstance(error.get("message"), str) else "Android bridge rejected the action"
-            raise BridgeError(code[:80], message[:500])
+            raise BridgeError(code[:80], message[:500], error.get("approval"))
         result = response.get("result")
         if not isinstance(result, dict):
             return {"result": _public_value(result)}
@@ -190,7 +198,7 @@ TOOL_DEFINITIONS = [
          "includeTree": {"type": "boolean", "default": True},
          "includeScreenshot": {"type": "boolean", "default": False},
          "expectedPackage": {"type": "string", "maxLength": 255}}, "additionalProperties": False}},
-    {"name": "android_action", "description": "Perform one bounded Android action. On supported DAXQO builds, wake may dismiss a non-secure swipe lock through Android's official API while control is enabled. Verify the returned screen/lock state. Secure locks and DAXQO/Android permission, login, payment, identity, or safety pauses cannot be resumed through this tool.",
+    {"name": "android_action", "description": "Perform one bounded Android action under the owner's phone policy. Full mode executes without an extra DAXQO consent gate. Confirm mode returns approval_required plus an approval ID for sensitive writes; report waiting for owner confirmation and end the turn, without asking the owner to operate the phone. Owner GUI or authenticated email handles consent and automatically resumes this task. Never approve yourself or change policy through other tools. Wake can dismiss a known non-secure swipe lock through Android's official API; verify actual state. Report actual system failures accurately; no secure-keyguard or protected-window bypass.",
      "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
      "inputSchema": {"type": "object", "properties": {
          "action": {"type": "string", "enum": list(ACTION_NAMES)},
@@ -315,7 +323,9 @@ class AndroidMCP:
             try:
                 result = self.call_tool(params["name"], params.get("arguments", {}))
             except BridgeError as exc:
-                result = self._tool_result([{"type": "text", "text": f"{exc.code}: {exc}"}], is_error=True)
+                error = {"code": exc.code, "message": str(exc)}
+                if exc.approval is not None: error["approval"] = exc.approval
+                result = self._tool_result([self._text({"ok": False, "error": error})], is_error=True)
         else:
             return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": "Method not found"}}
         return {"jsonrpc": "2.0", "id": ident, "result": result}

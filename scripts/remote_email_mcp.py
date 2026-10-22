@@ -129,6 +129,11 @@ class RemoteEmailMCP:
             if set(args) != {"taskId"}:
                 raise ValueError("remote_stop requires taskId")
             return self.send("stop", {"taskId": args["taskId"]})
+        if name in ("remote_approve", "remote_decline"):
+            if set(args) != {"taskId", "approvalId"}:
+                raise ValueError(name + " requires taskId and approvalId")
+            action = "approve" if name == "remote_approve" else "decline"
+            return self.send(action, {"taskId": args["taskId"], "approvalId": args["approvalId"]})
         raise ValueError("Unknown remote email tool")
 
 
@@ -136,6 +141,8 @@ TOOLS = [
     {"name": "remote_submit", "description": "Email a signed task request to the configured DAXQO device. Success means only that SMTP accepted the message.", "inputSchema": {"type": "object", "properties": {"prompt": {"type": "string", "minLength": 1, "maxLength": 8000}, "title": {"type": "string", "maxLength": 100}}, "required": ["prompt"], "additionalProperties": False}},
     {"name": "remote_status", "description": "Email a signed request for device/task status.", "inputSchema": {"type": "object", "properties": {"taskId": {"type": "string", "maxLength": 200}}, "additionalProperties": False}},
     {"name": "remote_stop", "description": "Email a signed request to stop one task.", "inputSchema": {"type": "object", "properties": {"taskId": {"type": "string", "minLength": 1, "maxLength": 200}}, "required": ["taskId"], "additionalProperties": False}},
+    {"name": "remote_approve", "description": "Email a signed decision accepting one pending Android permission approval owned by this contact.", "inputSchema": {"type": "object", "properties": {"taskId": {"type": "string", "minLength": 1, "maxLength": 200}, "approvalId": {"type": "string", "format": "uuid"}}, "required": ["taskId", "approvalId"], "additionalProperties": False}},
+    {"name": "remote_decline", "description": "Email a signed decision declining one pending Android permission approval owned by this contact.", "inputSchema": {"type": "object", "properties": {"taskId": {"type": "string", "minLength": 1, "maxLength": 200}, "approvalId": {"type": "string", "format": "uuid"}}, "required": ["taskId", "approvalId"], "additionalProperties": False}},
 ]
 
 
@@ -210,6 +217,9 @@ def _print_command(config: dict, args) -> None:
     elif args.command in {"status", "stop"}:
         if args.task_id is not None:
             fields["taskId"] = args.task_id
+    elif args.command in {"approve", "decline"}:
+        fields["taskId"] = args.task_id
+        fields["approvalId"] = args.approval_id
     elif args.command == "result":
         fields["report"] = json.loads(args.report)
     payload = make_payload(config, args.command, fields)
@@ -219,10 +229,11 @@ def _print_command(config: dict, args) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--print-command", choices=("submit", "status", "stop", "result"))
+    parser.add_argument("--print-command", choices=("submit", "status", "stop", "approve", "decline", "result"))
     parser.add_argument("--prompt")
     parser.add_argument("--title")
     parser.add_argument("--task-id")
+    parser.add_argument("--approval-id")
     parser.add_argument("--report", default="{}")
     args = parser.parse_args(argv)
     try:

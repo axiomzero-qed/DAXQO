@@ -40,6 +40,7 @@ import java.net.URL;
 import java.security.MessageDigest;
 
 public final class MainActivity extends Activity {
+    private static MainActivity visibleActivity;
     private static final String UI_BASE = "http://127.0.0.1:18880/";
     private static final String PREFS = "pairing_private";
     private static final String CAP_KEY = "capability";
@@ -53,6 +54,31 @@ public final class MainActivity extends Activity {
     private boolean connectionInProgress;
     private static final int FILE_CHOOSER_REQUEST = 1042;
     private ValueCallback<Uri[]> fileChooserCallback;
+
+    @Override protected void onStart() { super.onStart(); visibleActivity = this; }
+    @Override protected void onStop() {
+        if (visibleActivity == this) visibleActivity = null;
+        super.onStop();
+    }
+    @Override protected void onResume() {
+        super.onResume();
+        if (shouldRetryConnection(trustedGuiLoaded, connectionInProgress)) prepareAndLoadGui();
+    }
+    static boolean shouldRetryConnection(boolean trusted, boolean inProgress) { return !trusted && !inProgress; }
+    static boolean mayReturnToTarget(boolean visible, boolean trusted, boolean focused, boolean closing) {
+        return visible && trusted && focused && !closing;
+    }
+    // Package-only native continuation. Not a JS bridge, intent or tool action.
+    // Called exactly once when consent transitions from pending to approved.
+    static void returnToTargetAfterApproval() {
+        MainActivity activity = visibleActivity;
+        if (activity == null || !mayReturnToTarget(visibleActivity == activity, activity.trustedGuiLoaded,
+                activity.hasWindowFocus(), activity.isFinishing() || activity.isDestroyed())) return;
+        if (activity.webView == null || activity.webView.getVisibility() != View.VISIBLE) return;
+        try {
+            if (activity.isGuiUrl(Uri.parse(activity.webView.getUrl()))) activity.moveTaskToBack(true);
+        } catch (Exception ignored) { /* Consent remains valid if Android refuses task navigation. */ }
+    }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -476,6 +502,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        if (visibleActivity == this) visibleActivity = null;
         if (fileChooserCallback != null) {
             fileChooserCallback.onReceiveValue(null);
             fileChooserCallback = null;

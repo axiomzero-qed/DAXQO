@@ -36,6 +36,7 @@
         </activity>
         <activity android:name=".ControlActivity" android:exported="false" />
         <activity android:name=".WakeActivity" android:exported="false"
+            android:taskAffinity=""
             android:excludeFromRecents="true"
             android:showWhenLocked="true" android:turnScreenOn="true"
             android:theme="@style/AppTheme" />

@@ -5,14 +5,41 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.PowerManager;
 import org.json.JSONObject;
+import org.json.JSONArray;
 
 final class DeviceState {
     static final String PREFS = "device_control_private";
+    static final ApprovalLedger approvals = new ApprovalLedger();
     private DeviceState() {}
     static SharedPreferences prefs(Context context) { return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
     static boolean enabled(Context context) { return prefs(context).getBoolean("enabled", false); }
     static String needsUser(Context context) { return prefs(context).getString("needs_user", ""); }
+    static String policyMode(Context context) { return "full".equals(prefs(context).getString("policy_mode", "confirm")) ? "full" : "confirm"; }
+    static boolean isReadOnly(String action) { return "status".equals(action) || "tree".equals(action) || "screenshot".equals(action); }
+    static boolean requiresApproval(String mode, String action, String reason) {
+        return !"full".equals(mode) && !isReadOnly(action) && !reason.isEmpty();
+    }
+    // Consent records permission, not an attempt to unlock or perform an action.
+    static boolean mayRecordApproval(boolean controlEnabled, boolean needsUser) { return controlEnabled && !needsUser; }
+    // Called only by the native control screen, never by a bridge operation.
+    static void setPolicyMode(Context context, String mode) {
+        if (!"confirm".equals(mode) && !"full".equals(mode)) return;
+        approvals.revoke();
+        prefs(context).edit().putString("policy_mode", mode).apply();
+    }
+    static JSONObject approvalJson(ApprovalLedger.Entry entry) throws Exception {
+        return new JSONObject().put("id", entry.id).put("action", entry.action).put("packageName", entry.packageName)
+                .put("summary", entry.summary).put("status", entry.status).put("expiresAt", entry.expiresAt);
+    }
+    static JSONArray approvalList() {
+        JSONArray array = new JSONArray();
+        synchronized (approvals) {
+            for (ApprovalLedger.Entry entry : approvals.list(android.os.SystemClock.elapsedRealtime())) try { array.put(approvalJson(entry)); } catch (Exception ignored) { }
+        }
+        return array;
+    }
     static void setEnabled(Context context, boolean enabled) {
+        approvals.revoke();
         SharedPreferences.Editor edit = prefs(context).edit().putBoolean("enabled", enabled);
         if (enabled) edit.remove("needs_user");
         edit.apply();
@@ -20,6 +47,7 @@ final class DeviceState {
         if (service != null) service.refreshNotification();
     }
     static void requireUser(Context context, String reason) {
+        approvals.revoke();
         prefs(context).edit().putBoolean("enabled", false).putString("needs_user", reason).apply();
         DeviceAccessibilityService service = DeviceAccessibilityService.current;
         if (service != null) service.refreshNotification();
@@ -57,6 +85,8 @@ final class DeviceState {
             result.put("paired", context.getSharedPreferences("pairing_private", Context.MODE_PRIVATE).getString("capability", "").length() >= 32);
             result.put("accessibilityConnected", service != null);
             result.put("controlEnabled", enabled(context));
+            result.put("policyMode", policyMode(context));
+            result.put("approvals", approvalList());
             result.put("needsUser", needsUser(context));
             result.put("locked", lock.locked);
             result.put("lockStateKnown", lock.known);

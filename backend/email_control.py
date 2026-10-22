@@ -84,6 +84,36 @@ def _plain_date(message, since: str, now=None):
         raise ValueError("仅处理启用后的新邮件，且邮件日期须在24小时内") from None
 
 
+def _plain_approval_command(text: str):
+    """Recognize a decision only on the first non-empty authenticated body line."""
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    match = re.fullmatch(r"(确认|拒绝)\s+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})", first)
+    if match:
+        try:
+            approval_id = str(uuid.UUID(match.group(2)))
+        except ValueError:
+            approval_id = None
+        if approval_id:
+            return ("approve" if match.group(1) == "确认" else "decline", approval_id)
+    terminal = first.rstrip("。！？.!?").strip()
+    if terminal in {"确认", "同意", "批准", "允许", "确认安装", "同意安装", "我确认需要安装，你来点确认"}:
+        return ("approve_unambiguous", None)
+    # Ambiguous confirmation prose must never fall through and become a new task.
+    if first.startswith(("确认", "拒绝", "批准", "继续", "你来点确认", "我确认需要安装")):
+        return ("approval_help", None)
+    return None
+
+
+def _approval_like_subject(subject: str) -> bool:
+    candidate = subject.strip()
+    while True:
+        match = re.match(r"^(?:re|fw|fwd)\s*:\s*", candidate, flags=re.IGNORECASE)
+        if not match:
+            break
+        candidate = candidate[match.end():]
+    return _plain_approval_command(candidate) is not None
+
+
 def _verify_plain_email(raw: bytes, sender: str, receiver: str, since: str, *, now=None, dnsfunc=None) -> dict:
     """Authenticate the complete received bytes before interpreting instructions.
 
@@ -135,27 +165,52 @@ def _verify_plain_email(raw: bytes, sender: str, receiver: str, since: str, *, n
     if not authenticated: raise ValueError("Gmail 发件签名未通过验证，未执行；请检查网络或使用 Agent/MCP")
     if msg.get("Auto-Submitted", "no").lower() != "no" or msg.get("List-Id"):
         raise ValueError("自动通知或邮件列表不作为任务执行")
-    subject = MailControlService._receipt_subject(msg["Subject"])
+    # Preserve the complete decoded subject for task interpretation. Receipt
+    # and UI presentation call _receipt_subject with its default short limit.
+    subject = MailControlService._receipt_subject(msg["Subject"], limit=None)
     nonce = "plain:" + hashlib.sha256((sender + "\n" + message_id).encode("utf-8")).hexdigest()
     command = {"action": "submit", "title": subject[:100] or "邮箱任务", "nonce": nonce,
                "messageId": message_id, "subject": subject}
     if any(part.get_content_disposition() == "attachment" or part.get_filename() for part in msg.walk()):
         raise _AuthenticatedMailRejected("普通邮件任务暂不支持附件，请直接在正文说明任务", command)
     part = msg.get_body(preferencelist=("plain", "html"))
-    if part is None: raise _AuthenticatedMailRejected("请在邮件正文中直接说明任务", command)
-    try:
-        text = part.get_content()
-        if not isinstance(text, str): raise ValueError
-        if part.get_content_type() == "text/html":
-            parser = _MailHTMLText()
-            parser.feed(text)
-            text = "".join(parser.parts)
-    except Exception:
-        raise _AuthenticatedMailRejected("邮件正文无法解码", command) from None
+    if part is None:
+        # An empty MIME container has no decodable body to prefer. Treat only
+        # that genuinely empty structure as a title-only request; unsupported
+        # or malformed body parts still fail closed.
+        payload = msg.get_payload()
+        if payload not in (None, "", []):
+            raise _AuthenticatedMailRejected("邮件正文无法解码", command)
+        text = ""
+    else:
+        try:
+            text = part.get_content()
+            if not isinstance(text, str): raise ValueError
+            if part.get_content_type() == "text/html":
+                parser = _MailHTMLText()
+                parser.feed(text)
+                text = "".join(parser.parts)
+        except Exception:
+            raise _AuthenticatedMailRejected("邮件正文无法解码", command) from None
     text = text.strip()
+    if not text:
+        # A subject may itself be a simple task. Never turn a subject line into
+        # an approval decision, including common reply/forward subject prefixes.
+        if _approval_like_subject(subject):
+            return {**command, "action": "approval_help", "title": subject[:100] or "审批决定"}
+        if not subject.strip():
+            raise _AuthenticatedMailRejected("请在主题或正文中提供任务内容", command)
+        prompt = ("邮件主题：" + subject).strip()
+        if len(prompt) > PLAIN_MAX_PROMPT:
+            raise _AuthenticatedMailRejected("主题与正文合计不超过8000字", command)
+        return {**command, "title": subject[:100], "prompt": prompt}
     prompt = ("邮件主题：" + subject + "\n\n" + text).strip()
-    if not text or len(prompt) > PLAIN_MAX_PROMPT:
-        raise _AuthenticatedMailRejected("请提供非空正文，主题与正文合计不超过8000字", command)
+    if len(prompt) > PLAIN_MAX_PROMPT:
+        raise _AuthenticatedMailRejected("主题与正文合计不超过8000字", command)
+    decision = _plain_approval_command(text)
+    if decision:
+        action, approval_id = decision
+        return {**command, "action": action, "approvalId": approval_id, "title": subject[:100] or "审批决定"}
     return {**command, "prompt": prompt}
 
 
@@ -198,11 +253,13 @@ class MailControlService:
                                      ("message_id", "TEXT"), ("ack_status", "TEXT")):
                 if name not in command_columns: self.store.db.execute(f"ALTER TABLE mail_commands ADD COLUMN {name} {definition}")
             self.store.db.execute("CREATE TABLE IF NOT EXISTS mail_receipts (id TEXT PRIMARY KEY,contact_id TEXT NOT NULL,contact_email TEXT NOT NULL,subject TEXT NOT NULL,status TEXT NOT NULL,reason TEXT NOT NULL,received_at TEXT NOT NULL,header_hash TEXT NOT NULL UNIQUE)")
+            self.store.db.execute("CREATE TABLE IF NOT EXISTS mail_approval_notices (approval_id TEXT PRIMARY KEY,task_id TEXT NOT NULL,contact_id TEXT NOT NULL,command_id TEXT NOT NULL UNIQUE,status TEXT NOT NULL,created_at TEXT NOT NULL)")
             receipt_columns = {row[1] for row in self.store.db.execute("PRAGMA table_info(mail_receipts)")}
             if "task_id" not in receipt_columns: self.store.db.execute("ALTER TABLE mail_receipts ADD COLUMN task_id TEXT")
         with self.store.lock, self.store.db:
             self.store.db.execute("UPDATE mail_commands SET status='interrupted',error='Backend restarted before command completed' WHERE status='claimed'")
             self.store.db.execute("UPDATE mail_commands SET status='reply_uncertain',error='Backend restarted during reply send' WHERE status='replying'")
+            self.store.db.execute("UPDATE mail_approval_notices SET status='reply_uncertain' WHERE status='sending'")
             self.store.db.execute("UPDATE mail_commands SET ack_status='uncertain' WHERE ack_status='sending'")
         self.last_error = None
         self._config = self._read_config()
@@ -541,9 +598,10 @@ class MailControlService:
         return raw if message_size <= len(raw) <= MAX_MESSAGE else b""
 
     @staticmethod
-    def _receipt_subject(value) -> str:
+    def _receipt_subject(value, *, limit=200) -> str:
         text = " ".join(str(value or "").split())
-        return "".join(ch for ch in text if ch >= " " and ch != "\x7f")[:200]
+        text = "".join(ch for ch in text if ch >= " " and ch != "\x7f")
+        return text if limit is None else text[:limit]
 
     def _trusted_header_contact(self, headers):
         values = [addr for _, addr in getaddresses(headers.get_all("From", [])) if addr]
@@ -604,8 +662,8 @@ class MailControlService:
                         or not self._config.get("plainEmailEnabled")): return False
                 command_id = str(uuid.uuid4())
                 try:
-                    self.store.db.execute("INSERT INTO mail_commands(id,contact_id,nonce,action,status,received_at,transport,subject,message_id,ack_status) VALUES(?,?,?,'submit','claimed',?,'plain',?,?,'pending')",
-                                          (command_id, current["id"], command["nonce"], _stamp(), subject, command["messageId"]))
+                    self.store.db.execute("INSERT INTO mail_commands(id,contact_id,nonce,action,status,received_at,transport,subject,message_id,ack_status) VALUES(?,?,?,?,'claimed',?,'plain',?,?,?)",
+                                          (command_id, current["id"], command["nonce"], command["action"], _stamp(), subject, command["messageId"], "pending" if command["action"] == "submit" else None))
                 except sqlite3.IntegrityError: return False
                 authenticated_contact = dict(current)
             if rejection:
@@ -617,9 +675,11 @@ class MailControlService:
             self._dispatch(command_id, authenticated_contact, command)
             with self.store.lock:
                 row = self.store.db.execute("SELECT status,task_id FROM mail_commands WHERE id=?", (command_id,)).fetchone()
-            if row and row["task_id"]:
+            if row and row["task_id"] and command["action"] == "submit":
                 self._record_receipt(contact, subject, "已验证本人 Gmail，已创建任务", header_hash, status="accepted", task_id=row["task_id"])
                 self._send_plain_ack(command_id, authenticated_contact, row["task_id"])
+            elif row and command["action"] != "submit":
+                self._record_receipt(contact, subject, "已验证本人 Gmail，已处理审批指令", header_hash, status="accepted", task_id=row["task_id"])
             else:
                 self._record_receipt(contact, subject, "身份验证已通过，但任务未能启动，请查看最近命令", header_hash, status="failed")
             return bool(row and row["task_id"])
@@ -697,6 +757,102 @@ class MailControlService:
         with self.store.lock:
             return self.store.db.execute("SELECT * FROM mail_commands WHERE contact_id=? AND task_id=? AND action='submit' ORDER BY received_at LIMIT 1", (contact_id, task_id)).fetchone()
 
+    def _dispatch_approval(self, command_id, contact, command):
+        action = command["action"]
+        with self._auth_lock, self.store.lock:
+            active = (self._config.get("enabled") and self.store.db.execute(
+                "SELECT 1 FROM mail_contacts WHERE id=? AND enabled=1 AND deleted_at IS NULL", (contact["id"],)).fetchone())
+        if not active:
+            self._finish_command(command_id, "interrupted", "邮箱或联系人已停用")
+            return
+        if action == "approval_help":
+            self._send_reply(command_id, contact, {"action": "result", "status": "instructions",
+                "error": "如需处理权限审批，请在邮件首个非空行完整写：确认 <审批ID> 或 拒绝 <审批ID>。审批ID见待审批通知；没有ID时不会创建新任务。"})
+            return
+
+        requested_task_id = command.get("taskId")
+        if action == "approve_unambiguous":
+            with self.store.lock:
+                owned_task_ids = [r[0] for r in self.store.db.execute(
+                    "SELECT DISTINCT task_id FROM mail_commands WHERE contact_id=? AND task_id IS NOT NULL AND action='submit'",
+                    (contact["id"],))]
+            candidates = []
+            now_ms = int(time.time() * 1000)
+            for owned_id in owned_task_ids:
+                for item in self.harness.android_permission_approvals(task_id=owned_id):
+                    try: expires = int(item.get("expiresAt"))
+                    except (TypeError, ValueError, OverflowError): continue
+                    if item.get("taskId") == owned_id and item.get("status") == "pending" and expires > now_ms:
+                        candidates.append(item)
+            if len(candidates) != 1:
+                self._send_reply(command_id, contact, {"action": "result", "status": "instructions",
+                    "error": "当前联系人名下没有唯一一项有效待审批操作。请回复首行“确认 <审批ID>”或“拒绝 <审批ID>”，不会猜测审批目标。"})
+                return
+            approval = candidates[0]
+            approval_id = str(approval["id"])
+            action = "approve"
+        else:
+            try:
+                approval_id = str(uuid.UUID(command.get("approvalId", "")))
+            except (TypeError, ValueError, AttributeError):
+                self._send_reply(command_id, contact, {"action": action, "status": "rejected", "error": "审批编号格式无效"})
+                return
+            approvals = (self.harness.android_permission_approvals(task_id=requested_task_id)
+                         if requested_task_id else self.harness.android_permission_approvals())
+            approval = next((item for item in approvals if str(item.get("id", "")).lower() == approval_id
+                             and (not requested_task_id or item.get("taskId") == requested_task_id)), None)
+        if not approval:
+            self._send_reply(command_id, contact, {"action": action, "status": "rejected", "error": "未找到属于该任务的待处理审批"})
+            return
+        task_id = approval.get("taskId")
+        if not isinstance(task_id, str) or not self._owned_task(contact["id"], task_id):
+            self._send_reply(command_id, contact, {"action": action, "status": "rejected", "error": "该联系人无权处理此审批"})
+            return
+        if approval.get("status") != "pending":
+            self._send_reply(command_id, contact, {"action": action, "taskId": task_id,
+                "approvalId": approval["id"], "status": "rejected", "error": "此审批已过期、已处理或已失效"})
+            return
+        try:
+            expires_at = int(approval.get("expiresAt"))
+        except (TypeError, ValueError, OverflowError):
+            expires_at = 0
+        if expires_at <= int(time.time() * 1000):
+            self._send_reply(command_id, contact, {"action": action, "taskId": task_id,
+                "approvalId": approval["id"], "status": "rejected", "error": "此审批已过期"})
+            return
+
+        decision = "accept" if action == "approve" else "decline"
+        # Serialize the final ownership/authorization check with contact revocation.
+        decision_error = None
+        result = None
+        authorized = False
+        with self._auth_lock:
+            with self.store.lock:
+                active = (self._config.get("enabled") and self.store.db.execute(
+                    "SELECT 1 FROM mail_contacts WHERE id=? AND enabled=1 AND deleted_at IS NULL", (contact["id"],)).fetchone())
+            if active and self._owned_task(contact["id"], task_id):
+                authorized = True
+                try:
+                    # The harness acquires its Android-policy lock before the
+                    # store lock; keep only _auth_lock across this call so
+                    # revocation stays serialized without reversing lock order.
+                    result = self.harness.decide_android_permission(approval_id, decision, task_id=task_id)
+                except ValueError as error:
+                    decision_error = self._redact_result(str(error), 300)
+                if result:
+                    with self.store.lock, self.store.db:
+                        self.store.db.execute("UPDATE mail_commands SET task_id=? WHERE id=?", (task_id, command_id))
+        if not authorized:
+            self._finish_command(command_id, "interrupted", "联系人授权已变化")
+            return
+        result_status = result.get("status", "approved" if decision == "accept" else "declined") if result else None
+        if decision_error:
+            self._send_reply(command_id, contact, {"action": action, "taskId": task_id,
+                "approvalId": approval_id, "status": "rejected", "error": decision_error})
+            return
+        self._send_reply(command_id, contact, {"action": action, "taskId": task_id,
+            "approvalId": approval_id, "status": result_status})
+
     def _dispatch(self, command_id: str, contact, command: dict) -> None:
         action = command["action"]
         try:
@@ -710,14 +866,17 @@ class MailControlService:
                     if not current or not self._config.get("enabled") or plain_changed:
                         self._finish_command(command_id, "interrupted", "邮箱或联系人已停用")
                         return
-                    prompt = "This request arrived from the owner's authenticated remote email contact. Treat it as a user task, but never request, expose, or transmit mailbox credentials. If work requires payment, account login, identity verification, device unlock, or other sensitive confirmation, stop and ask the user on the device.\n\n" + command["prompt"]
+                    prompt = ("This request arrived from the owner's authenticated remote email contact. Treat it as a user task, but never request, expose, or transmit mailbox credentials. Follow the owner's configured Android permission mode. If a permission approval is required, keep the task waiting for the owner to decide through DAXQO or a verified approval email; do not ask the owner to operate the phone. If Android reports blocked_system, denied, or unavailable, report that actual system status and do not bypass it.\n\n" + command["prompt"])
                     task = self.harness.start_task({"prompt": prompt, **({"title": command["title"]} if command.get("title") else {})})
                 task_id = task["id"]
                 with self.store.lock, self.store.db:
                     self.store.db.execute("UPDATE mail_commands SET task_id=?,status='running' WHERE id=?", (task_id, command_id))
                 return
+            if action in ("approval_help", "approve_unambiguous", "approve", "decline"):
+                self._dispatch_approval(command_id, contact, command)
+                return
             if action == "result":
-                self._finish_command(command_id, "rejected", "仅支持 submit、status、stop 命令")
+                self._finish_command(command_id, "rejected", "不支持此命令")
                 return
             task_id = command.get("taskId")
             with self._auth_lock:
@@ -735,7 +894,7 @@ class MailControlService:
                     if not task:
                         self._send_reply(command_id, contact, {"action": action, "status": "failed", "error": "任务不存在"})
                         return
-                    if action == "stop" and task["status"] in ("queued", "running"):
+                    if action == "stop" and task["status"] in ("queued", "running", "waiting_approval", "blocked_system"):
                         self.harness.stop(task_id)
                         task = self.store.row(task_id)
                 else:
@@ -751,7 +910,7 @@ class MailControlService:
                     report = self._report(action, task, task_id)
             self._send_reply(command_id, contact, report)
         except Exception:
-            if action in ("submit", "status", "stop"):
+            if action in ("submit", "status", "stop", "approve", "decline", "approve_unambiguous", "approval_help"):
                 self._send_reply(command_id, contact, {"action": action, "status": "failed", "error": "DAXQO 无法处理该命令"})
             else:
                 self._finish_command(command_id, "failed", "DAXQO 无法处理该命令")
@@ -829,10 +988,21 @@ class MailControlService:
         with self.store.lock:
             row = self.store.db.execute("SELECT transport FROM mail_commands WHERE id=?", (command_id,)).fetchone()
         if row and row["transport"] == "plain":
-            labels = {"completed": "已完成", "failed": "失败", "stopped": "已停止", "needs_user": "需要你处理", "queued": "排队中", "running": "执行中"}
+            labels = {"completed": "已完成", "failed": "失败", "stopped": "已停止", "cancelled": "已取消",
+                      "needs_user": "需要你处理", "blocked_system": "系统限制，未能继续", "waiting_approval": "等待你的审批",
+                      "queued": "排队中", "running": "执行中", "approved": "已批准，任务继续", "consumed": "已批准，任务继续",
+                      "declined": "已拒绝", "expired": "已过期", "stale": "已失效", "instructions": "需要审批编号"}
             lines = ["达序手机任务报告", "", "任务：" + str(report.get("title", "邮箱任务")),
                      "状态：" + labels.get(report.get("status"), str(report.get("status", "未知"))),
                      "任务编号：" + str(report.get("taskId", ""))]
+            approval = report.get("approval")
+            if isinstance(approval, dict):
+                lines += ["", "待审批操作：" + str(approval.get("action", "")),
+                          "目标应用：" + str(approval.get("packageName") or "系统界面"),
+                          "说明：" + str(approval.get("summary", "")),
+                          "审批编号：" + str(approval.get("id", "")),
+                          "到期时间：" + str(approval.get("expiresAtText", "")),
+                          "回复本邮件首行：确认 " + str(approval.get("id", "")) + "；或拒绝 " + str(approval.get("id", ""))]
             if report.get("result"): lines += ["", str(report["result"])]
             if report.get("error"): lines += ["", "处理说明：" + str(report["error"])]
             if report.get("truncated"): lines += ["", "报告已节选，完整内容请在手机 DAXQO 对话中查看。"]
@@ -890,7 +1060,7 @@ class MailControlService:
                 if cursor.rowcount != 1: return
         message = self._plain_message(command_id, config, contact, "达序已接单：",
             "已验证你的 Gmail 身份，已在手机创建任务，正在排队或执行。\n\n任务编号：" + task_id
-            + "\n\n完成或遇到阻塞后会通过本邮箱回报，也可在手机 DAXQO 查看进度。敏感操作仍需在手机确认。")
+            + "\n\n完成或遇到系统限制后会通过本邮箱回报，也可在手机 DAXQO 查看进度。若需要权限审批，可通过 DAXQO 或待审批邮件作决定；不要求你代为操作手机。")
         try:
             self._transmit(config, contact, message)
             outcome = "sent"
@@ -915,8 +1085,72 @@ class MailControlService:
         for command in rows:
             task = self.store.row(command["task_id"])
             if not task or task["status"] in ("queued", "running"): continue
+            if task["status"] == "waiting_approval":
+                with self._auth_lock, self.store.lock:
+                    mail_enabled = bool(self._config.get("enabled"))
+                    contact_active = self.store.db.execute(
+                        "SELECT 1 FROM mail_contacts WHERE id=? AND enabled=1 AND deleted_at IS NULL",
+                        (command["contact_id"],)).fetchone()
+                if not mail_enabled:
+                    continue
+                if not contact_active:
+                    self._finish_command(command["id"], "interrupted", "联系人已停用")
+                    continue
+                self._deliver_approval_notices(command, task)
+                continue
             self._send_reply(command["id"], {"id": command["contact_id"], "email": command["email"], "secret": command["secret"]},
                              self._report("result", task, command["task_id"]))
+
+    def _deliver_approval_notices(self, command, task):
+        approvals = self.harness.android_permission_approvals(task_id=command["task_id"])
+        now_ms = int(time.time() * 1000)
+        for item in approvals:
+            if item.get("taskId") != command["task_id"] or item.get("status") != "pending":
+                continue
+            try:
+                expires_ms = int(item.get("expiresAt"))
+                expires_text = dt.datetime.fromtimestamp(expires_ms / 1000, dt.timezone.utc).astimezone(
+                    dt.timezone(dt.timedelta(hours=8))).isoformat(timespec="seconds")
+            except (TypeError, ValueError, OverflowError, OSError):
+                continue
+            if expires_ms <= now_ms:
+                continue
+            approval_id = item.get("id")
+            try:
+                canonical_id = str(uuid.UUID(approval_id))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if canonical_id != approval_id.lower():
+                continue
+            contact = {"id": command["contact_id"], "email": command["email"], "secret": command["secret"]}
+            if not self._owned_task(contact["id"], command["task_id"]):
+                continue
+            notice_id = str(uuid.uuid4())
+            notice_nonce = "approval-notice:" + hashlib.sha256(approval_id.encode("ascii")).hexdigest()
+            with self._auth_lock, self.store.lock, self.store.db:
+                try:
+                    self.store.db.execute("INSERT INTO mail_commands(id,contact_id,nonce,action,task_id,status,received_at,transport,subject) VALUES(?,?,?,'approval_notice',?,'claimed',?,?,?)",
+                        (notice_id, contact["id"], notice_nonce, command["task_id"], _stamp(), command.get("transport", "signed"), "待处理的手机权限审批"))
+                    self.store.db.execute("INSERT INTO mail_approval_notices(approval_id,task_id,contact_id,command_id,status,created_at) VALUES(?,?,?,?,'sending',?)",
+                        (approval_id, command["task_id"], contact["id"], notice_id, _stamp()))
+                except sqlite3.IntegrityError:
+                    continue
+            approval = {
+                "id": approval_id,
+                "action": self._redact_result(item.get("action", ""), 200),
+                "packageName": self._redact_result(item.get("packageName") or "系统界面", 200),
+                "summary": self._redact_result(item.get("summary", ""), 500),
+                "expiresAt": expires_ms,
+                "expiresAtText": expires_text,
+                "replyFormat": "确认 " + approval_id + " / 拒绝 " + approval_id,
+            }
+            notice_report = {"action": "result", "status": "waiting_approval", "taskId": command["task_id"],
+                             "title": self._redact_result(task.get("title", "邮箱任务"), 200), "approval": approval}
+            self._send_reply(notice_id, contact, notice_report)
+            with self.store.lock, self.store.db:
+                status = self.store.db.execute("SELECT status FROM mail_commands WHERE id=?", (notice_id,)).fetchone()
+                self.store.db.execute("UPDATE mail_approval_notices SET status=? WHERE approval_id=?",
+                                      (status["status"] if status else "reply_uncertain", approval_id))
 
     def handle_http(self, handler, method: str, path: str) -> bool:
         handled = (path == "/api/remote" and method == "GET") or (path in ("/api/remote/settings", "/api/remote/test", "/api/remote/contacts") and method == "POST")

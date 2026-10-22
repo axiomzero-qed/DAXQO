@@ -27,6 +27,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 from task_services import TaskServices
 from email_control import MailControlService
+from android_mcp_server import AndroidBridge, BridgeError
 
 RPC_TIMEOUT = 30.0
 MAX_BODY = 1024 * 1024
@@ -491,6 +492,7 @@ class Store:
             if "turn_id" not in columns: self.db.execute("ALTER TABLE tasks ADD COLUMN turn_id TEXT")
             self.db.execute("CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, type TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(task_id) REFERENCES tasks(id))")
             self.db.execute("CREATE TABLE IF NOT EXISTS progress (seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(task_id) REFERENCES tasks(id))")
+            self.db.execute("CREATE TABLE IF NOT EXISTS android_approvals (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, status TEXT NOT NULL, action TEXT NOT NULL, package_name TEXT NOT NULL, summary TEXT NOT NULL, expires_at INTEGER NOT NULL, continuation_queued INTEGER NOT NULL DEFAULT 0)")
             self.db.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, client_message_id TEXT, role TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL, turn_id TEXT, delivery TEXT, error TEXT, FOREIGN KEY(task_id) REFERENCES tasks(id), UNIQUE(task_id,client_message_id))")
             message_columns = {row[1] for row in self.db.execute("PRAGMA table_info(messages)")}
             if "retry_safe" not in message_columns: self.db.execute("ALTER TABLE messages ADD COLUMN retry_safe INTEGER NOT NULL DEFAULT 0")
@@ -634,6 +636,11 @@ class Harness:
         self._agent_threads: dict[str, str] = {}
         self._approval_lock = threading.Lock()
         self.pending_approvals: dict[str, dict[str, Any]] = {}
+        self._android_policy_lock = threading.RLock()
+        self._android_stop = threading.Event()
+        self._android_worker = None
+        self._android_errors: dict[str, str] = {}
+        self._android_approval_conflicts: set[str] = set()
         self._loaded_threads: set[str] = set()
         self.services = TaskServices(self)
         self.remote = MailControlService(self)
@@ -818,7 +825,7 @@ class Harness:
                    f"model_auto_compact_token_limit = {int(compact)}\n"
                    f"model_context_window = {int(context_window)}\n"
                    "tool_output_token_limit = 2000\n"
-                   f"developer_instructions = \"For long tasks, give brief public progress after major steps and when blocked. Delegate independent checks to at most {agent_threads} subagents when useful; do not recursively delegate. Handle simple tasks directly. For Android tasks use the daxqo_android MCP tools in an observe-action-observe loop; use screenshots for visual checks. If locked, paused, secure, or needs_user, report that the user must unlock or confirm on the phone and stop automation. Never bypass device security or use shell/adb to grant permissions. Never reveal hidden reasoning or credentials.\"\n"
+                   f"developer_instructions = \"For long tasks, give brief public progress after major steps and when blocked. Delegate independent checks to at most {agent_threads} subagents when useful; do not recursively delegate. Handle simple tasks directly. For Android tasks use daxqo_android in an observe-action-observe loop, with screenshots for visual checks. Follow the owner's native policy: full mode attempts requested operations directly; confirm mode returns approval_required for sensitive writes. On approval_required, report the specific pending action and approval ID, then end the turn waiting for owner consent. The GUI/authenticated email will record consent and automatically resume this task. Do not ask the owner to click the target button or perform your work. Never approve yourself, change control mode, or use shell/adb to bypass consent. If screen-off or non-secure locked, try android_action wake. Secure keyguard and actual OS restrictions must be reported accurately, not attributed to an untested system prohibition. Never reveal hidden reasoning or credentials.\"\n"
                    "preferred_auth_method = \"apikey\"\n"
                    "forced_login_method = \"api\"\n"
                    f"{catalog_setting}"
@@ -1071,6 +1078,154 @@ class Harness:
         except OSError: pass
         return token
 
+    @staticmethod
+    def _android_tool_error(item: dict) -> dict | None:
+        """Only our authenticated adapter's bounded JSON result is control data."""
+        result = item.get("result") or {}
+        if not isinstance(result, dict): return None
+        for block in result.get("content", [])[:8]:
+            if not isinstance(block, dict) or block.get("type") != "text": continue
+            text = block.get("text")
+            if not isinstance(text, str) or len(text) > 64000: continue
+            try: value = json.loads(text)
+            except (ValueError, TypeError): continue
+            if isinstance(value, dict) and value.get("ok") is False and isinstance(value.get("error"), dict):
+                return value["error"]
+        return None
+
+    def _record_android_tool(self, task_id: str, item: dict) -> None:
+        error = self._android_tool_error(item)
+        if not error:
+            self._android_errors.pop(task_id, None)
+            return
+        code = error.get("code")
+        approval = error.get("approval")
+        if code == "approval_required" and isinstance(approval, dict):
+            ident, expiry = approval.get("id"), approval.get("expiresAt")
+            try:
+                if not isinstance(ident, str) or str(uuid.UUID(ident)) != ident: return
+                if type(expiry) not in (int, float) or not time.time()*1000 < expiry <= (time.time()+900)*1000: return
+            except (ValueError, TypeError): return
+            values = (ident, task_id, "pending", self.safe_text(approval.get("action", ""), 40),
+                      self.safe_text(approval.get("packageName", ""), 200), self.safe_text(approval.get("summary", "待确认手机操作"), 500), int(expiry))
+            with self._android_policy_lock, self.store.lock, self.store.db:
+                # A different task may not claim an approval previously bound by
+                # the actual app-server thread. Tool arguments never set ownership.
+                self.store.db.execute("INSERT OR IGNORE INTO android_approvals(id,task_id,status,action,package_name,summary,expires_at) VALUES(?,?,?,?,?,?,?)", values)
+                owner = self.store.db.execute("SELECT task_id FROM android_approvals WHERE id=?", (ident,)).fetchone()
+                if owner and owner[0] != task_id:
+                    self._android_approval_conflicts.add(task_id)
+            self.store.event(task_id, "approval", "等待你确认：" + values[5])
+            self.store.progress(task_id, "phase", {"phase": "waiting_approval", "summary": values[5]})
+        elif code in ("secure_window", "locked", "wake_unavailable", "accessibility_unavailable", "screen_off", "paused", "needs_user", "control_ui_local_only"):
+            self._android_errors[task_id] = self.safe_text(error.get("message", code), 500)
+
+    def _android_approval_rows(self, task_id: str | None = None) -> list[dict]:
+        with self.store.lock:
+            rows = self.store.db.execute("SELECT * FROM android_approvals" + (" WHERE task_id=?" if task_id else "") + " ORDER BY rowid DESC LIMIT 100", (task_id,) if task_id else ()).fetchall()
+        return [{"id": r["id"], "taskId": r["task_id"], "status": r["status"], "action": r["action"],
+                 "packageName": r["package_name"], "summary": r["summary"], "expiresAt": r["expires_at"],
+                 "_continuation": r["continuation_queued"]} for r in rows]
+
+    def _refresh_android_permissions(self) -> dict:
+        snapshot = AndroidBridge(self.state).status()
+        live = {a.get("id"): a for a in snapshot.get("approvals", []) if isinstance(a, dict)}
+        with self._android_policy_lock, self.store.lock, self.store.db:
+            for record in self._android_approval_rows():
+                current = live.get(record["id"])
+                state = current.get("status") if current else None
+                if state not in ("pending", "approved", "consumed", "declined", "expired", "stale"):
+                    if record["status"] not in ("pending", "approved"): continue
+                    state = "expired" if record["expiresAt"] <= time.time()*1000 else "stale"
+                # A replayed snapshot cannot renew a consumed or rejected approval.
+                if record["status"] in ("consumed", "declined", "expired", "stale") and state in ("pending", "approved"): continue
+                self.store.db.execute("UPDATE android_approvals SET status=? WHERE id=?", (state, record["id"]))
+        return snapshot
+
+    def android_permission_approvals(self, task_id: str | None = None) -> list[dict]:
+        try: self._refresh_android_permissions()
+        except BridgeError: pass  # Keep the request visible; loss of connectivity grants nothing.
+        rows = self._android_approval_rows(task_id)
+        return [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows]
+
+    def android_permissions(self) -> dict:
+        try:
+            state = self._refresh_android_permissions()
+            return {"connected": True, "policyMode": state.get("policyMode", "confirm"),
+                    "controlEnabled": state.get("controlEnabled"), "needsUser": state.get("needsUser", ""),
+                    "approvals": [{k: v for k, v in r.items() if not k.startswith("_")} for r in self._android_approval_rows()]}
+        except BridgeError as error:
+            return {"connected": False, "policyMode": "unknown", "controlEnabled": None,
+                    "needsUser": str(error), "approvals": [{k: v for k, v in r.items() if not k.startswith("_")} for r in self._android_approval_rows()]}
+
+    def decide_android_permission(self, approval_id: str, decision: str, *, task_id: str | None = None) -> dict:
+        if decision not in ("accept", "decline"): raise ValueError("只支持批准一次或拒绝")
+        try:
+            if str(uuid.UUID(approval_id)) != approval_id: raise ValueError()
+        except (ValueError, TypeError, AttributeError): raise ValueError("审批编号无效") from None
+        with self._android_policy_lock:
+            records = self.android_permission_approvals(task_id)
+            record = next((r for r in records if r["id"] == approval_id), None)
+            if not record: raise ValueError("这项审批不存在或不属于该任务")
+            task = self.store.row(record["taskId"])
+            if not task or task.get("stop_requested") or task["status"] in ("stopped", "failed", "cancelled"):
+                raise ValueError("任务已停止，不能继续批准操作")
+            if record["status"] in ("expired", "stale") or record["expiresAt"] <= time.time()*1000:
+                raise ValueError("审批已过期或界面已变化，请让达序重新观察并申请")
+            if record["status"] in ("approved", "consumed") and decision == "accept": return record
+            if record["status"] == "declined":
+                if decision == "decline": return record
+                raise ValueError("该操作已拒绝，不能复用原审批")
+            try:
+                response = AndroidBridge(self.state).request("POST", "/api/device/approvals/" + approval_id, {"decision": decision})
+            except BridgeError as error: raise ValueError(str(error)) from None
+            native = response.get("approval", response)
+            if not isinstance(native, dict) or native.get("status") not in ("approved", "declined", "consumed"):
+                raise ValueError("手机未接受本次确认：" + self.safe_text(response.get("error", "请刷新审批状态"), 200))
+            with self.store.lock, self.store.db:
+                self.store.db.execute("UPDATE android_approvals SET status=? WHERE id=?", (native["status"], approval_id))
+            record["status"] = native["status"]
+            self.store.event(record["taskId"], "approval", "已批准一次" if decision == "accept" else "已拒绝本次操作")
+        self._resume_android_approved()
+        return record
+
+    def _resume_android_approved(self) -> None:
+        for record in self._android_approval_rows():
+            task = self.store.row(record["taskId"])
+            if not task or task["status"] != "waiting_approval" or task.get("stop_requested"): continue
+            if record["status"] == "declined":
+                self.store.update(task["id"], status="stopped", stop_requested=1, result="已按你的决定取消这项操作，未执行。")
+                self.store.event(task["id"], "status", "stopped")
+                continue
+            if record["status"] not in ("approved", "consumed") or record["_continuation"]: continue
+            with self._android_policy_lock, self.store.lock, self.store.db:
+                claim = self.store.db.execute("UPDATE android_approvals SET continuation_queued=1 WHERE id=? AND continuation_queued=0", (record["id"],))
+                if claim.rowcount != 1: continue
+            try:
+                self.send_message(task["id"], {"text": "机主已批准本次手机操作（审批编号 " + record["id"] + "）：" + record["summary"]
+                    + "。请继续原任务，重试刚才相同的操作并核验实际结果。授权仅限这一次；如页面已变化，重新观察申请，不要让机主替你点击。",
+                    "clientMessageId": "android-approval-" + record["id"]})
+            except (ValueError, KeyError):
+                with self.store.lock, self.store.db:
+                    self.store.db.execute("UPDATE android_approvals SET continuation_queued=0 WHERE id=?", (record["id"],))
+
+    def start_android_permissions(self) -> None:
+        if self._android_worker and self._android_worker.is_alive(): return
+        self._android_stop.clear()
+        def monitor():
+            while not self._android_stop.wait(2):
+                if not any(r["status"] in ("pending", "approved") for r in self._android_approval_rows()): continue
+                try:
+                    self._refresh_android_permissions()
+                    self._resume_android_approved()
+                except (BridgeError, ValueError): continue
+        self._android_worker = threading.Thread(target=monitor, name="android-owner-consent", daemon=True)
+        self._android_worker.start()
+
+    def close_android_permissions(self) -> None:
+        self._android_stop.set()
+        if self._android_worker: self._android_worker.join(timeout=1)
+
     def _engine_event(self, event: dict[str, Any]) -> None:
         params = event.get("params") or {}
         tid = params.get("threadId")
@@ -1088,6 +1243,8 @@ class Harness:
                 child = bool(target)
         if not target: return
         item = params.get("item") or {}
+        if method == "item/completed" and item.get("type") == "mcpToolCall" and item.get("server") == "daxqo_android":
+            self._record_android_tool(target, item)
         kind, text = None, None
         if method.endswith("/delta") and ("agentMessage" in method or item.get("type") == "agentMessage"):
             delta = params.get("delta", params.get("text", ""))
@@ -1246,9 +1403,19 @@ class Harness:
                 self.store.event(target, "status", self.store.row(target)["status"])
             elif status == "completed":
                 result = self._last_message(target)
-                self.store.update(target, status="completed", result=result)
-                if result: self.store.add_message(target, "assistant", result, "completed", turn_id=(params.get("turnId") or turn.get("id")))
-                self.store.event(target, "status", "completed")
+                approvals = self._android_approval_rows(target)
+                if approvals:
+                    try: self._refresh_android_permissions()
+                    except BridgeError: pass
+                    approvals = self._android_approval_rows(target)
+                latest = approvals[0] if approvals else None
+                outcome = ("waiting_approval" if target in self._android_approval_conflicts or latest and latest["status"] in ("pending", "approved", "expired", "stale")
+                           else "stopped" if latest and latest["status"] == "declined"
+                           else "blocked_system" if target in self._android_errors else "completed")
+                self.store.update(target, status=outcome, result=result,
+                                  error=self._android_errors.get(target) if outcome == "blocked_system" else None)
+                if result: self.store.add_message(target, "assistant", result, outcome, turn_id=(params.get("turnId") or turn.get("id")))
+                self.store.event(target, "status", outcome)
             else:
                 error = "Codex turn ended without a successful terminal status"
                 self.store.update(target, status="interrupted", error=error)
@@ -1256,6 +1423,12 @@ class Harness:
             with self.lock: self._sync_active_task_id()
             self._clear_task_mapping(target)
             self.store.progress(target, "phase", {"phase": self.store.row(target)["status"], "summary": self.store.row(target)["status"]})
+            # A steer rejection can queue a message before this completion is
+            # observed. Its first continuation attempt then sees a running turn;
+            # retry after clearing that turn, on the same saved thread.
+            if self.store.row(target)["status"] == "completed":
+                threading.Thread(target=self._start_queued, args=(target,), name=f"followup-{target}", daemon=True).start()
+            threading.Thread(target=self._resume_android_approved, name="android-consent-continuation", daemon=True).start()
             threading.Thread(target=self._start_waiting_queued, name="queued-tasks", daemon=True).start()
             return
         if kind and text:
@@ -1422,6 +1595,7 @@ class Harness:
         engine = self.engine
         assert engine
         row = self.store.row(task_id)
+        self._android_approval_conflicts.discard(task_id)
         self.store.update(task_id, status="running")
         self.store.event(task_id, "status", "running")
         self.store.progress(task_id, "phase", {"phase": "running", "summary": "正在执行"})
@@ -1529,7 +1703,7 @@ class Harness:
                 if not turn: return self.store.public(row), message, "queued"
                 thread_id = row.get("thread_id")
             else:
-                if row["status"] not in ("completed", "interrupted", "stopped", "failed"):
+                if row["status"] not in ("completed", "interrupted", "stopped", "failed", "waiting_approval", "blocked_system"):
                     raise ValueError("Task cannot accept a message in its current state")
                 if not row.get("thread_id"): raise ValueError("Task has no saved Codex thread")
                 if len(active_ids) >= self.max_concurrent_tasks():
@@ -1584,7 +1758,8 @@ class Harness:
     def _start_queued(self, task_id: str) -> None:
         with self.lock:
             row = self.store.row(task_id)
-            if not row or row["status"] not in ("queued", "completed", "interrupted", "stopped", "failed"): return
+            if not row or row["status"] not in ("queued", "completed", "interrupted", "stopped", "failed", "waiting_approval", "blocked_system"): return
+            self._android_approval_conflicts.discard(task_id)
             active_rows = self.store.active_rows()
             active_ids = {r["id"] for r in active_rows}
             running_count = sum(r["status"] == "running" for r in active_rows)
@@ -1645,6 +1820,15 @@ class Harness:
     def stop(self, task_id: str) -> dict[str, Any]:
         row = self.store.row(task_id)
         if not row: raise KeyError("Task not found")
+        if row["status"] in ("waiting_approval", "blocked_system"):
+            self.store.update(task_id, status="stopped", stop_requested=1)
+            for record in self._android_approval_rows(task_id):
+                if record["status"] not in ("pending", "approved"): continue
+                try: AndroidBridge(self.state).request("POST", "/api/device/approvals/" + record["id"], {"decision": "decline"})
+                except BridgeError: pass
+                with self.store.lock, self.store.db:
+                    self.store.db.execute("UPDATE android_approvals SET status='declined' WHERE id=?", (record["id"],))
+            self.store.event(task_id, "status", "stopped")
         if row["status"] in ("queued", "running"):
             self.store.update(task_id, stop_requested=1)
             try:
@@ -1742,6 +1926,7 @@ def create_handler(harness: Harness):
                 except ValueError as exc: return self._json(400, {"error": str(exc)})
                 except OSError: return self._json(404, {"error": "Not found"})
             if path == "/api/status": return self._json(200, harness.status())
+            if path == "/api/android/permissions": return self._json(200, harness.android_permissions())
             if path == "/api/approvals": return self._json(200, {"approvals": harness.approvals()})
             if path == "/api/provider": return self._json(200, harness.public_provider())
             if path == "/api/models":
@@ -1776,6 +1961,8 @@ def create_handler(harness: Harness):
                 if path == "/api/engine/reconnect":
                     return self._json(200, {"status": harness.reconnect()})
                 parts = path.split("/")
+                if len(parts) == 5 and parts[:4] == ["", "api", "android", "approvals"]:
+                    return self._json(200, harness.decide_android_permission(parts[4], self._body().get("decision")))
                 if len(parts) == 4 and parts[:3] == ["", "api", "approvals"]:
                     body = self._body()
                     return self._json(200, {"approval": harness.decide_approval(parts[3], body.get("decision"))})
@@ -1832,6 +2019,7 @@ def main() -> int:
     try:
         ensure_runtime_control(Path(__file__).resolve().parent, state, workspace, args.port)
         harness.services.start()
+        harness.start_android_permissions()
         harness.remote.start()
         server_thread.join()
     except KeyboardInterrupt:
@@ -1842,6 +2030,7 @@ def main() -> int:
         http.server_close()
         harness.services.close()
         harness.remote.close()
+        harness.close_android_permissions()
         if harness.engine: harness.engine.close()
     return 0
 

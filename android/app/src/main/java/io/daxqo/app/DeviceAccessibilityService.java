@@ -24,6 +24,12 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.util.Locale;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Map;
+import java.util.HashMap;
+import java.security.MessageDigest;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -45,6 +51,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
 
     @Override protected void onServiceConnected() {
         super.onServiceConnected();
+        DeviceState.approvals.revoke();
         current = this;
         bridge = new DeviceHttpBridge(this);
         bridge.start();
@@ -54,8 +61,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
         // Browsing Settings or the notification shade is a user's ordinary
         // interaction, not an agent action. Passive events must not revoke or
-        // restore control. executeMain and screenshot/input callbacks enforce
-        // the sensitive-screen gates when a tool actually requests access.
+        // restore control. Active operations enforce their own authorization.
     }
     @Override public void onInterrupt() {
         // This callback interrupts accessibility feedback. We provide no such
@@ -63,6 +69,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
     }
     @Override public void onDestroy() {
         if (current == this) current = null;
+        DeviceState.approvals.revoke();
         WakeActivity.finishActive();
         if (bridge != null) bridge.close();
         screenshots.shutdownNow();
@@ -171,18 +178,20 @@ public final class DeviceAccessibilityService extends AccessibilityService {
             pollWake(id, deadline, launch, callback);
             return;
         }
-        if (DeviceState.locked(this)) { callback.done(failure(id, "locked", "手机已锁定，请亲自解锁；达序不会绕过锁屏")); return; }
+        DeviceState.LockState currentLock = DeviceState.lockState(this);
+        if (!currentLock.known || currentLock.locked) { callback.done(lockedFailure(id, currentLock)); return; }
         PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
         if (power == null || !power.isInteractive()) { callback.done(failure(id, "screen_off", "屏幕已关闭，请先唤醒手机")); return; }
-        if (!DeviceState.enabled(this)) { callback.done(paused(id)); return; }
+        if (!DeviceState.enabled(this) || !DeviceState.needsUser(this).isEmpty()) { callback.done(paused(id)); return; }
         String expected = args.optString("expectedPackage", "");
         String actual = foregroundPackage();
         if (!expected.isEmpty() && !expected.equals(actual)) { callback.done(failure(id, "foreground_changed", "前台应用已变化，请重新读取屏幕")); return; }
-        String sensitive = sensitiveReason();
-        if (!sensitive.isEmpty()) {
-            DeviceState.requireUser(this, sensitive);
-            callback.done(failure(id, "needs_user", sensitive + "；请亲自完成，再到手机控制页继续"));
-            return;
+        boolean readOnly = DeviceState.isReadOnly(action);
+        if (!readOnly && ControlActivity.visible) { callback.done(failure(id, "control_ui_local_only", "本机控制页只接受你亲自操作，请返回目标应用后重试")); return; }
+        if (!readOnly && ownerConfirmationUi()) { callback.done(failure(id, "owner_confirmation_ui", "当前是你确认操作的界面，手机工具不能自行点击批准；请由你确认后继续")); return; }
+        if (!readOnly && ("tap".equals(action) || "long_press".equals(action) || "swipe".equals(action) || "back".equals(action) || "home".equals(action))) {
+            JSONObject blocked = authorizeMutation(id, action, args, sensitiveReason());
+            if (blocked != null) { callback.done(blocked); return; }
         }
         switch (action) {
             case "tree": callback.done(success(id, tree())); return;
@@ -196,10 +205,11 @@ public final class DeviceAccessibilityService extends AccessibilityService {
             case "open_app":
                 String packageName = args.optString("packageName", "");
                 if (!packageName.matches("[A-Za-z0-9_]+(\\.[A-Za-z0-9_]+)+") || packageName.length() > 200) { callback.done(failure(id, "invalid_args", "请提供有效应用包名")); return; }
-                // Authentication and system grant interfaces must be entered by the user.
-                if (sensitivePackage(packageName)) { callback.done(failure(id, "needs_user", "此系统授权应用需要你手动打开")); return; }
                 Intent launch = getPackageManager().getLaunchIntentForPackage(packageName);
                 if (launch == null) { callback.done(failure(id, "app_not_found", "应用未安装或没有可用的桌面入口")); return; }
+                String reason = sensitivePackage(packageName) ? "打开系统授权或设置应用" : sensitiveReason();
+                JSONObject blocked = authorizeMutation(id, action, args, reason);
+                if (blocked != null) { callback.done(blocked); return; }
                 launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 startActivity(launch);
                 callback.done(success(id, new JSONObject().put("launched", true).put("packageName", packageName)));
@@ -235,6 +245,207 @@ public final class DeviceAccessibilityService extends AccessibilityService {
     private JSONObject paused(String id) {
         String reason = DeviceState.needsUser(this);
         return failure(id, reason.isEmpty() ? "paused" : "needs_user", reason.isEmpty() ? "手机控制已暂停，请在手机控制页手动开启" : reason + "；请亲自处理后在手机控制页继续");
+    }
+
+    JSONObject decideApproval(String approvalId, String decision) {
+        CountDownLatch finished = new CountDownLatch(1);
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+        JSONObject[] result = new JSONObject[1];
+        main.post(() -> {
+            if (cancelled.get()) return;
+            result[0] = decideApprovalMain(approvalId, decision);
+            finished.countDown();
+        });
+        try { if (finished.await(3, TimeUnit.SECONDS)) return result[0]; }
+        catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+        cancelled.set(true);
+        return failure(approvalId, "timeout", "确认响应超时，请重新核对审批状态");
+    }
+
+    // Both GUI decisions and the authenticated human-confirmation endpoint use
+    // this main-thread path. A decision never starts or resumes phone control.
+    JSONObject decideApprovalMain(String approvalId, String decision) {
+        if (!"accept".equals(decision) && !"decline".equals(decision)) return failure(approvalId, "invalid_args", "请选择批准或拒绝");
+        if (current != this) return failure(approvalId, "accessibility_unavailable", "无障碍服务未连接");
+        if (!DeviceState.mayRecordApproval(DeviceState.enabled(this), !DeviceState.needsUser(this).isEmpty())) return paused(approvalId);
+        // A remote owner may consent while the phone sleeps or is locked. No
+        // operation runs here; executeMain/authorizeMutation check the actual
+        // lock again before consuming the grant and performing the operation.
+        synchronized (DeviceState.approvals) {
+            ApprovalLedger.Result result = DeviceState.approvals.decide(approvalId, "accept".equals(decision), android.os.SystemClock.elapsedRealtime());
+            if (result.newlyApproved) MainActivity.returnToTargetAfterApproval();
+            return approvalResult(approvalId, result, "确认已失效，请等待新的操作确认");
+        }
+    }
+
+    private JSONObject approvalResult(String requestId, ApprovalLedger.Result result, String message) {
+        try {
+            if (result.code.isEmpty()) return DeviceState.approvalJson(result.entry);
+            JSONObject response = failure(requestId, result.code, message);
+            if (result.entry != null) response.getJSONObject("error").put("approval", DeviceState.approvalJson(result.entry));
+            return response;
+        } catch (Exception ignored) { return failure(requestId, "action_failed", "无法读取操作确认状态"); }
+    }
+
+    // A null result authorizes exactly the imminent operation. Full mode skips
+    // only DAXQO's sensitivity gate, never Android's actual security checks.
+    private JSONObject authorizeMutation(String id, String action, JSONObject args, String reason) throws Exception {
+        if (!DeviceState.enabled(this) || !DeviceState.needsUser(this).isEmpty()) return paused(id);
+        DeviceState.LockState lock = DeviceState.lockState(this);
+        if (!lock.known || lock.locked) return lockedFailure(id, lock);
+        if (ControlActivity.visible) return failure(id, "control_ui_local_only", "本机控制页只接受你亲自操作，请返回目标应用后重试");
+        if (ownerConfirmationUi()) return failure(id, "owner_confirmation_ui", "当前是你确认操作的界面，手机工具不能自行批准");
+        if (!DeviceState.requiresApproval(DeviceState.policyMode(this), action, reason)) return null;
+        String page = pageFingerprint("input".equals(action) && args.optString("nodeId", "").isEmpty());
+        if (page == null) return failure(id, "no_window", "当前没有可绑定的应用界面，请重新读取屏幕");
+        Map<String, String> fields = new HashMap<>();
+        java.util.Iterator<String> names = args.keys();
+        while (names.hasNext()) { String key = names.next(); fields.put(key, canonical(args.get(key))); }
+        // Input reaches this method only after its current snapshot/node has
+        // been validated. The snapshot is an observation handle, not consent.
+        String operation = digest(operationIdentity(action, fields, "input".equals(action) && !args.optString("nodeId", "").isEmpty()));
+        synchronized (DeviceState.approvals) {
+            ApprovalLedger.Result result = DeviceState.approvals.check(operation, page, action, foregroundPackage(),
+                    actionSummary(action) + "：" + reason + approvalContext(), android.os.SystemClock.elapsedRealtime());
+            if (result.code.isEmpty()) return null;
+            String message = "action_denied".equals(result.code) ? "你已拒绝这项操作，达序不会执行"
+                    : "stale_approval".equals(result.code) ? "操作确认因过期、控制变更或页面变化失效，请重新确认"
+                    : "请确认这项操作；批准后达序会重试并自行执行";
+            return approvalResult(id, result, message);
+        }
+    }
+    private static String actionSummary(String action) {
+        switch (action) {
+            case "input": return "输入文本";
+            case "tap": return "点击";
+            case "swipe": return "滑动";
+            case "long_press": return "长按";
+            case "open_app": return "打开应用";
+            case "back": return "返回";
+            case "home": return "返回桌面";
+            default: return "手机操作";
+        }
+    }
+    private JSONObject lockedFailure(String id, DeviceState.LockState lock) {
+        return failure(id, "locked", !lock.known ? "无法确认锁屏安全状态，请先在手机上核对"
+                : lock.secureLock || lock.deviceSecure ? "手机设有安全锁或 SIM 保护，请亲自解锁；达序不会绕过锁屏"
+                : "手机仍在无密码滑动锁屏，请先调用 android_action 的 wake 再重试");
+    }
+    static String operationIdentity(String action, Map<String, String> canonicalFields, boolean validatedNodeInput) {
+        ArrayList<String> keys = new ArrayList<>(canonicalFields.keySet());
+        Collections.sort(keys);
+        StringBuilder identity = new StringBuilder(action).append('\n');
+        for (String key : keys) {
+            if ("input".equals(action) && validatedNodeInput && "snapshotId".equals(key)) continue;
+            String field = canonicalFields.get(key);
+            identity.append(key.length()).append(':').append(key).append(field.length()).append(':').append(field);
+        }
+        return identity.toString();
+    }
+    private boolean ownerConfirmationUi() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return false;
+        try {
+            return getPackageName().equals(value(root.getPackageName(), 200)) && containsOwnerConfirmation(root, new int[] {0}, 0);
+        } finally { root.recycle(); }
+    }
+    private boolean containsOwnerConfirmation(AccessibilityNodeInfo node, int[] count, int depth) {
+        if (++count[0] > 400 || depth > 30 || !node.isVisibleToUser()) return false;
+        if (!node.isPassword() && (node.isClickable() || value(node.getClassName(), 200).endsWith("Button"))
+                && ("批准一次".equals(value(node.getText(), 100).trim()) || "批准一次".equals(value(node.getContentDescription(), 100).trim()))) return true;
+        for (int i = 0; i < Math.min(node.getChildCount(), 200); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child == null) continue;
+            boolean found;
+            try { found = containsOwnerConfirmation(child, count, depth + 1); } finally { child.recycle(); }
+            if (found) return true;
+        }
+        return false;
+    }
+    private static String canonical(Object value) throws Exception {
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            ArrayList<String> keys = new ArrayList<>();
+            java.util.Iterator<String> iterator = object.keys();
+            while (iterator.hasNext()) keys.add(iterator.next());
+            Collections.sort(keys);
+            StringBuilder text = new StringBuilder("{");
+            for (String key : keys) text.append(JSONObject.quote(key)).append(':').append(canonical(object.get(key))).append(',');
+            return text.append('}').toString();
+        }
+        if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            StringBuilder text = new StringBuilder("[");
+            for (int i = 0; i < array.length(); i++) text.append(canonical(array.get(i))).append(',');
+            return text.append(']').toString();
+        }
+        return value instanceof String ? JSONObject.quote((String) value) : String.valueOf(value);
+    }
+    private static String digest(String text) throws Exception {
+        return Base64.encodeToString(MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8)), Base64.NO_WRAP);
+    }
+    private String pageFingerprint(boolean bindInputFocus) throws Exception {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return null;
+        try {
+            JSONArray nodes = new JSONArray();
+            fingerprintNode(root, "0", nodes, new int[] {0}, 0, bindInputFocus);
+            // Android may recreate the same app window after keyguard/wake.
+            // Its runtime window id is not a page identity; retain all of the
+            // package, visible content, controls and state binding instead.
+            return digest(pageIdentity(value(root.getPackageName(), 200), nodes.toString()));
+        } finally { root.recycle(); }
+    }
+    static String pageIdentity(String packageName, String visibleContent) { return packageName + "\n" + visibleContent; }
+    private void fingerprintNode(AccessibilityNodeInfo node, String path, JSONArray nodes, int[] count, int depth, boolean bindInputFocus) throws Exception {
+        if (++count[0] > 400 || depth > 30 || !node.isVisibleToUser()) return;
+        String viewId = value(node.getViewIdResourceName(), 250);
+        // System clocks and countdowns must not invalidate an otherwise stable
+        // consent. Other visible labels and control state remain bound.
+        if (viewId.toLowerCase(Locale.ROOT).matches(".*/(clock|date|time|timer|countdown)(?:_.*)?")) return;
+        Rect bounds = new Rect(); node.getBoundsInScreen(bounds);
+        String text = node.isPassword() ? "[password]" : value(node.getText(), 500);
+        String description = node.isPassword() ? "[password]" : value(node.getContentDescription(), 500);
+        JSONObject item = new JSONObject().put("path", path).put("id", viewId).put("class", value(node.getClassName(), 200))
+                .put("bounds", bounds.flattenToString()).put("text", stableLabel(text)).put("description", stableLabel(description))
+                .put("clickable", node.isClickable()).put("editable", node.isEditable()).put("enabled", node.isEnabled())
+                .put("checked", node.isChecked()).put("selected", node.isSelected()).put("password", node.isPassword());
+        if (bindInputFocus) item.put("inputFocused", node.isFocused());
+        nodes.put(item);
+        for (int i = 0; i < Math.min(node.getChildCount(), 200) && count[0] < 400; i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child == null) continue;
+            try { fingerprintNode(child, path + "." + i, nodes, count, depth + 1, bindInputFocus); } finally { child.recycle(); }
+        }
+    }
+    static String stableLabel(String label) {
+        return label.replaceAll("(?<![0-9])[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?(?![0-9])", "[clock]")
+                .replaceAll("(?i)(?<![0-9])[0-9]+\\s*(秒后|秒剩余|seconds? remaining|s remaining)", "[countdown]");
+    }
+    private String approvalContext() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return "";
+        try {
+            String name = value(root.getPackageName(), 200);
+            if (!(name.contains("packageinstaller") || name.contains("permissioncontroller"))) return "";
+            return findAppLabel(root, new int[] {0}, 0);
+        } finally { root.recycle(); }
+    }
+    private String findAppLabel(AccessibilityNodeInfo node, int[] count, int depth) {
+        if (++count[0] > 400 || depth > 30) return "";
+        String id = value(node.getViewIdResourceName(), 250);
+        if (!node.isPassword() && node.isVisibleToUser() && (id.endsWith("/app_name") || id.endsWith("/app_label"))) {
+            String label = value(node.getText(), 60).replace('\n', ' ').trim();
+            if (!label.isEmpty()) return "（应用：" + label + "）";
+        }
+        for (int i = 0; i < Math.min(node.getChildCount(), 200); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child == null) continue;
+            String label;
+            try { label = findAppLabel(child, count, depth + 1); } finally { child.recycle(); }
+            if (!label.isEmpty()) return label;
+        }
+        return "";
     }
 
     private int[] screenSize() {
@@ -278,7 +489,8 @@ public final class DeviceAccessibilityService extends AccessibilityService {
                 node = nodeAt(root, nodeId);
             }
             if (node == null || !node.isEditable()) { callback.done(failure(id, "no_input", "请先点击可编辑输入框")); return; }
-            if (node.isPassword()) { DeviceState.requireUser(this, "密码输入需要你亲自完成"); callback.done(failure(id, "needs_user", "密码输入需要你亲自完成")); return; }
+            JSONObject blocked = authorizeMutation(id, "input", args, node.isPassword() ? "向密码输入框填入文本" : sensitiveReason());
+            if (blocked != null) { callback.done(blocked); return; }
             Bundle value = new Bundle(); value.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, (String) raw);
             boolean ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, value);
             callback.done(ok ? success(id, new JSONObject().put("performed", true)) : failure(id, "action_failed", "应用未接受文本输入"));
@@ -339,16 +551,16 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         try {
             String packageName = value(root.getPackageName(), 200);
             if (getPackageName().equals(packageName)) return "";
-            if (sensitivePackage(packageName)) return "系统授权或安全界面需要你亲自处理";
+            if (sensitivePackage(packageName)) return "操作系统授权或安全界面";
             int[] inspected = {0};
             return inspectSensitive(root, inspected, 0);
         } finally { root.recycle(); }
     }
     private String inspectSensitive(AccessibilityNodeInfo node, int[] inspected, int depth) {
         if (++inspected[0] > 400 || depth > 30 || !node.isVisibleToUser()) return "";
-        if (node.isPassword()) return "密码或身份认证需要你亲自完成";
+        if (node.isPassword()) return "操作密码或身份认证界面";
         String text = (value(node.getText(), 500) + " " + value(node.getContentDescription(), 500)).toLowerCase(Locale.ROOT);
-        if (text.matches("(?s).*(确认支付|确认付款|立即支付|立即付款|支付密码|付款码|收付款|指纹验证|人脸验证|身份验证|身份认证|验证码|安全验证|确认授权|登录密码|confirm payment|pay now|payment confirmation|authenticate|biometric|verification code|sign in|log in).*")) return "支付或身份认证需要你亲自确认";
+        if (text.matches("(?s).*(确认支付|确认付款|立即支付|立即付款|支付密码|付款码|收付款|指纹验证|人脸验证|身份验证|身份认证|验证码|安全验证|确认授权|登录密码|confirm payment|pay now|payment confirmation|authenticate|biometric|verification code|sign in|log in).*")) return "操作支付或身份认证界面";
         for (int i = 0; i < Math.min(node.getChildCount(), 200); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child == null) continue;
@@ -370,8 +582,6 @@ public final class DeviceAccessibilityService extends AccessibilityService {
                 try {
                     if (DeviceState.locked(DeviceAccessibilityService.this) || !DeviceState.enabled(DeviceAccessibilityService.this)) { callback.done(paused(id)); return; }
                     if (!capturePackage.equals(foregroundPackage())) { callback.done(failure(id, "foreground_changed", "截图时前台应用已变化，请重新读取屏幕")); return; }
-                    String sensitive = sensitiveReason();
-                    if (!sensitive.isEmpty()) { DeviceState.requireUser(DeviceAccessibilityService.this, sensitive); callback.done(failure(id, "needs_user", sensitive)); return; }
                     bitmap = Bitmap.wrapHardwareBuffer(buffer, result.getColorSpace());
                     if (bitmap == null) { callback.done(failure(id, "screenshot_failed", "无法读取系统截图")); return; }
                     copy = bitmap.copy(Bitmap.Config.ARGB_8888, false);

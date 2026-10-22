@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 import android_mcp_server as mcp
 
@@ -41,6 +42,9 @@ class BridgeFixture(BaseHTTPRequestHandler):
     def do_POST(self):
         self._record()
         request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+        if self.path.startswith("/api/device/approvals/"):
+            return self._send(200, {"id": self.path.rsplit("/", 1)[-1],
+                                    "status": "approved" if request["decision"] == "accept" else "declined"})
         self.server.actions.append(request)
         action = request.get("action")
         if action == "tree":
@@ -77,6 +81,33 @@ class AndroidMCPTests(unittest.TestCase):
     def tearDown(self):
         self.http.shutdown(); self.http.server_close(); self.thread.join(timeout=1)
         self.temp.cleanup()
+
+    def test_pending_consent_survives_mcp_as_structured_json_without_secret_text(self):
+        pending = {"id": "746bdd02-1c84-4f1a-9ed4-cb880402f4ec", "status": "pending", "summary": "安装指定应用", "password": "must-not-leak"}
+        with patch.object(self.bridge, "execute", side_effect=mcp.BridgeError("approval_required", "等待机主确认", pending)):
+            response = self.server.dispatch({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"android_action", "arguments":{"action":"tap", "args":{"x":10,"y":20}}}})
+        value = json.loads(response["result"]["content"][0]["text"])
+        self.assertEqual(value["error"]["approval"]["id"], pending["id"])
+        self.assertEqual(value["error"]["code"], "approval_required")
+        self.assertNotIn("must-not-leak", json.dumps(response))
+
+    def test_adapter_exposes_no_self_approval_or_policy_change_tool(self):
+        self.assertEqual({t["name"] for t in mcp.TOOL_DEFINITIONS}, {"android_status", "android_observe", "android_action"})
+        response = self.server.dispatch({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"android_approve", "arguments":{}}})
+        self.assertTrue(response["result"]["isError"])
+
+    def test_owner_decision_traverses_authenticated_bridge_without_becoming_agent_tool(self):
+        ident = "746bdd02-1c84-4f1a-9ed4-cb880402f4ec"
+        result = self.bridge.request("POST", "/api/device/approvals/" + ident, {"decision": "accept"})
+        self.assertEqual(result, {"id": ident, "status": "approved"})
+        self.assertEqual(self.http.seen[-1]["authorization"], "Bearer fixture-capability-0123456789abcdef")
+        self.assertEqual(self.http.seen[-1]["path"], "/api/device/approvals/" + ident)
+        before = len(self.http.seen)
+        for path, body in [("/api/device/policy", {"decision": "accept"}),
+                           ("/api/device/approvals/../status", {"decision": "accept"}),
+                           ("/api/device/approvals/" + ident, {"decision": "full"})]:
+            with self.assertRaises(mcp.BridgeError): self.bridge.request("POST", path, body)
+        self.assertEqual(len(self.http.seen), before)
 
     def test_status_uses_loopback_capability_and_redacts_response(self):
         response = self.server.dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/call",

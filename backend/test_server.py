@@ -73,6 +73,9 @@ for line in sys.stdin:
             continue
         if p["input"][0].get("text") == "completion-race":
             print(json.dumps({"jsonrpc":"2.0","id":m["id"],"error":{"code":-32000,"message":"active turn cannot accept same-turn steering"}}), flush=True)
+            # Exercise rejection-before-completion instead of relying on which
+            # host thread happens to run first after the RPC reply.
+            time.sleep(0.05)
             print(json.dumps({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":p["threadId"],"turn":{"id":p["expectedTurnId"],"status":"completed"}}}), flush=True)
             continue
         print(json.dumps({"jsonrpc":"2.0","method":"fixture/steered","params":{"clientUserMessageId":p.get("clientUserMessageId"),"expectedTurnId":p["expectedTurnId"]}}), flush=True)
@@ -1066,6 +1069,78 @@ for line in sys.stdin:
         try: link.symlink_to(outside)
         except (OSError, NotImplementedError): self.skipTest("symlinks are not available on this host")
         with self.assertRaises(ValueError): self.harness.read_workspace_text("escape.txt")
+
+
+class AndroidOwnerConsentTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.h = server.Harness("not-installed", root/"state", root/"workspace", "127.0.0.1", 18880,
+                                test_engine=Mock(connected=True, account={"authenticated": True}))
+        stamp = server.now()
+        with self.h.store.db:
+            for ident in ("owner", "other"):
+                self.h.store.db.execute("INSERT INTO tasks(id,title,prompt,status,created_at,updated_at,thread_id,turn_id) VALUES(?,?,?,?,?,?,?,?)",
+                    (ident, "Install requested app", "owner request", "running", stamp, stamp, "thread-"+ident, "turn-1"))
+        self.a = {"id":"746bdd02-1c84-4f1a-9ed4-cb880402f4ec", "status":"pending", "action":"tap",
+                  "packageName":"com.android.packageinstaller", "summary":"确认安装所请求的应用", "expiresAt":int((time.time()+600)*1000)}
+        self.snapshot = {"policyMode":"confirm", "controlEnabled":True, "approvals":[self.a]}
+        self.bridge = Mock(); self.bridge.status.side_effect = lambda: self.snapshot
+        def decide(method, path, body):
+            self.a["status"] = "approved" if body["decision"] == "accept" else "declined"
+            return dict(self.a)
+        self.bridge.request.side_effect = decide
+        self.p = patch.object(server, "AndroidBridge", return_value=self.bridge); self.p.start()
+        self.h._record_android_tool("owner", self.item({"code":"approval_required", "approval":self.a}))
+
+    @staticmethod
+    def item(error):
+        return {"result":{"content":[{"type":"text", "text":json.dumps({"ok":False,"error":error})}]}}
+
+    def tearDown(self):
+        self.h.close_android_permissions(); self.p.stop(); self.h.store.db.close(); self.temp.cleanup()
+
+    def test_cross_task_cannot_claim_or_approve_the_existing_request(self):
+        self.h._record_android_tool("other", self.item({"code":"approval_required", "approval":self.a}))
+        self.assertEqual(self.h.android_permission_approvals("other"), [])
+        with self.assertRaises(ValueError): self.h.decide_android_permission(self.a["id"], "accept", task_id="other")
+        self.bridge.request.assert_not_called()
+        # A shared physical operation cannot be claimed by a second task, nor
+        # may that task claim completion while still waiting for consent.
+        self.h._task_events["other"] = [{"threadId":"thread-other", "turnId":"turn-1"}]
+        with patch.object(server.threading, "Thread"):
+            self.h._engine_event({"method":"turn/completed", "params":{"threadId":"thread-other", "turnId":"turn-1", "status":"completed"}})
+        self.assertEqual(self.h.store.row("other")["status"], "waiting_approval")
+
+    def test_accept_continues_original_task_once_and_replay_adds_no_grant(self):
+        self.h.store.update("owner", status="waiting_approval"); self.h.send_message = Mock()
+        self.h.decide_android_permission(self.a["id"], "accept", task_id="owner")
+        self.h.decide_android_permission(self.a["id"], "accept", task_id="owner")
+        self.h._resume_android_approved()
+        self.bridge.request.assert_called_once(); self.h.send_message.assert_called_once()
+        self.assertEqual(self.h.send_message.call_args.args[0], "owner")
+
+    def test_decline_stops_without_resuming(self):
+        self.h.store.update("owner", status="waiting_approval"); self.h.send_message = Mock()
+        self.h.decide_android_permission(self.a["id"], "decline")
+        self.assertEqual(self.h.store.row("owner")["status"], "stopped"); self.h.send_message.assert_not_called()
+
+    def test_native_restart_invalidates_pending_and_never_restores_consent(self):
+        self.snapshot["approvals"] = []
+        with self.assertRaises(ValueError): self.h.decide_android_permission(self.a["id"], "accept")
+        self.bridge.request.assert_not_called()
+        self.assertEqual(self.h.android_permission_approvals()[0]["status"], "stale")
+
+    def test_stop_revokes_pending_and_prevents_later_accept(self):
+        self.h.store.update("owner", status="waiting_approval"); self.h.stop("owner")
+        self.assertEqual(self.a["status"], "declined")
+        with self.assertRaises(ValueError): self.h.decide_android_permission(self.a["id"], "accept")
+
+    def test_model_turn_end_preserves_waiting_instead_of_completed(self):
+        self.h._task_events["owner"] = [{"threadId":"thread-owner", "turnId":"turn-1"}]
+        with patch.object(server.threading, "Thread"):
+            self.h._engine_event({"method":"turn/completed", "params":{"threadId":"thread-owner", "turnId":"turn-1", "status":"completed"}})
+        self.assertEqual(self.h.store.row("owner")["status"], "waiting_approval")
 
 
 if __name__ == "__main__": unittest.main()

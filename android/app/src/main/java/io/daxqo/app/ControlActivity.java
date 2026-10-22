@@ -1,6 +1,7 @@
 package io.daxqo.app;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.NotificationManager;
 import android.content.Intent;
 import android.content.pm.ShortcutInfo;
@@ -22,12 +23,16 @@ import android.widget.Toast;
 import org.json.JSONObject;
 
 public final class ControlActivity extends Activity {
+    static volatile boolean visible;
     static final String ACTION_PAUSE = "io.daxqo.app.PAUSE_CONTROL";
     static final String ACTION_CONTROL = "io.daxqo.app.CONTROL";
     private final Handler main = new Handler(Looper.getMainLooper());
     private TextView status;
     private TextView activity;
     private Button toggle;
+    private TextView policy;
+    private LinearLayout approvalBox;
+    private String shownApprovals = "";
     private final Runnable refresh = new Runnable() {
         @Override public void run() { updateStatus(); main.postDelayed(this, 1000); }
     };
@@ -59,6 +64,20 @@ public final class ControlActivity extends Activity {
             else DeviceState.setEnabled(this, true);
             updateStatus();
         });
+        policy = text("", 15, Color.rgb(37, 99, 235));
+        root.addView(policy);
+        root.addView(text("逐项确认：读取界面和普通操作可直接执行；支付、密码和系统授权等敏感操作先等你确认，批准后由达序完成。完整授权：在控制开启期间直接尝试这些操作，系统限制仍然有效。模式只能在本机此页切换。", 14, Color.rgb(80, 90, 105)));
+        button(root, "切换授权模式", v -> {
+            boolean full = "full".equals(DeviceState.policyMode(this));
+            new AlertDialog.Builder(this).setTitle(full ? "切换为逐项确认" : "开启完整授权")
+                    .setMessage(full ? "之后的敏感操作会等待你逐项确认。已有确认将失效。" : "控制开启时，达序可直接尝试支付、密码输入和系统授权界面操作。系统实际拒绝仍会返回失败；安全锁屏不会被绕过。你可以随时暂停或切回逐项确认。")
+                    .setNegativeButton("取消", null).setPositiveButton("确认切换", (dialog, which) -> {
+                        DeviceState.setPolicyMode(this, full ? "confirm" : "full"); updateStatus();
+                    }).show();
+        });
+        approvalBox = new LinearLayout(this);
+        approvalBox.setOrientation(LinearLayout.VERTICAL);
+        root.addView(approvalBox);
         button(root, "1  开启无障碍服务", v -> openSettings(Settings.ACTION_ACCESSIBILITY_SETTINGS));
         if (Build.VERSION.SDK_INT >= 33) root.addView(text("如系统提示“受限设置”，请在达序应用信息菜单中允许后，再手动开启无障碍服务。", 13, Color.rgb(100, 110, 125)));
         button(root, "2  允许控制状态通知", v -> {
@@ -70,7 +89,7 @@ public final class ControlActivity extends Activity {
         });
         button(root, "3  检查电池与后台设置", v -> openSettings(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
         button(root, "添加桌面控制入口", v -> pinShortcut());
-        root.addView(text("手机未设置安全密码且没有 SIM 锁时，远程唤醒会尝试通过系统关闭滑动锁屏。安全密码、SIM 保护或无法确认的状态需要你亲自处理。支付、密码、身份认证和系统授权仍需手动确认，保护暂停后请回到这里继续。", 14, Color.rgb(80, 90, 105)));
+        root.addView(text("手机未设置安全密码且没有 SIM 锁时，远程唤醒会尝试通过系统关闭滑动锁屏。安全密码、SIM 保护或无法确认的锁屏状态需要你亲自解锁。审批不会重启已暂停的控制，也不会替代系统要求的授权。", 14, Color.rgb(80, 90, 105)));
         root.addView(text("后台运行受手机系统和电池策略影响。请按需在系统应用信息中允许后台运行，并保持已有 Linux 环境在线。达序不会更改厂商容器或绕过系统权限。", 14, Color.rgb(80, 90, 105)));
         activity = text("", 13, Color.rgb(100, 110, 125));
         activity.setPadding(0, dp(16), 0, dp(8));
@@ -93,6 +112,8 @@ public final class ControlActivity extends Activity {
     }
     @Override protected void onResume() { super.onResume(); main.removeCallbacks(refresh); main.post(refresh); }
     @Override protected void onPause() { main.removeCallbacks(refresh); super.onPause(); }
+    @Override protected void onStart() { super.onStart(); visible = true; }
+    @Override protected void onStop() { visible = false; super.onStop(); }
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     private TextView text(String value, int size, int color) {
         TextView view = new TextView(this); view.setText(value); view.setTextSize(size); view.setTextColor(color);
@@ -100,13 +121,15 @@ public final class ControlActivity extends Activity {
         return view;
     }
     private Button button(LinearLayout root, String label, View.OnClickListener listener) {
-        Button button = new Button(this); button.setText(label); button.setAllCaps(false); button.setOnClickListener(listener);
+        Button button = new Button(this); button.setText(label); button.setAllCaps(false); button.setFilterTouchesWhenObscured(true); button.setOnClickListener(listener);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.topMargin = dp(6); params.bottomMargin = dp(4);
         root.addView(button, params); return button;
     }
     private void updateStatus() {
         if (status == null) return;
         JSONObject state = DeviceState.status(this);
+        policy.setText("授权模式：" + ("full".equals(state.optString("policyMode")) ? "完整授权" : "逐项确认（默认）"));
+        updateApprovals(state.optJSONArray("approvals"));
         String reason = state.optString("needsUser");
         boolean connected = state.optBoolean("accessibilityConnected");
         boolean enabled = state.optBoolean("controlEnabled");
@@ -124,6 +147,32 @@ public final class ControlActivity extends Activity {
         String last = state.optString("lastAction");
         String error = state.optString("lastError");
         activity.setText((last.isEmpty() ? "暂无手机操作" : "最近操作：" + last) + (error.isEmpty() ? "" : "\n" + error) + "\n暂停后不再接受新操作；当前手势最多2秒结束。");
+    }
+    private void updateApprovals(org.json.JSONArray approvals) {
+        String serialized = approvals == null ? "[]" : approvals.toString();
+        if (serialized.equals(shownApprovals)) return;
+        shownApprovals = serialized;
+        approvalBox.removeAllViews();
+        if (approvals == null) return;
+        for (int i = approvals.length() - 1; i >= 0; i--) {
+            JSONObject item = approvals.optJSONObject(i);
+            if (item == null || !("pending".equals(item.optString("status")) || "approved".equals(item.optString("status")))) continue;
+            approvalBox.addView(text(("pending".equals(item.optString("status")) ? "等待你确认：" : "已批准，等待任务重试：") + item.optString("summary") + "\n应用：" + item.optString("packageName") + "\n确认限本次操作和当前页面，10 分钟内有效。", 14, Color.rgb(80, 90, 105)));
+            if ("pending".equals(item.optString("status"))) {
+                button(approvalBox, "批准这一次并返回原应用", v -> decide(item.optString("id"), "accept"));
+                button(approvalBox, "拒绝这一次", v -> decide(item.optString("id"), "decline"));
+            }
+            break;
+        }
+    }
+    private void decide(String id, String decision) {
+        DeviceAccessibilityService service = DeviceAccessibilityService.current;
+        JSONObject result = service == null ? null : service.decideApprovalMain(id, decision);
+        if (result != null && ("approved".equals(result.optString("status")) || "declined".equals(result.optString("status")))) {
+            Toast.makeText(this, "accept".equals(decision) ? "已批准，达序将重试并执行" : "已拒绝该操作", Toast.LENGTH_SHORT).show();
+            if ("accept".equals(decision)) { moveTaskToBack(true); finish(); }
+        } else Toast.makeText(this, result == null ? "无障碍服务未连接" : result.optJSONObject("error") == null ? "确认未生效" : result.optJSONObject("error").optString("message"), Toast.LENGTH_LONG).show();
+        updateStatus();
     }
     private void openSettings(String action) {
         try { startActivity(new Intent(action)); }
