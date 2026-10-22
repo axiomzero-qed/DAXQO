@@ -1,4 +1,4 @@
-param([switch]$InstallTools)
+param([switch]$InstallTools, [switch]$Lint)
 $ErrorActionPreference = 'Stop'
 $androidDir = $PSScriptRoot
 $repoDir = Split-Path -Parent $androidDir
@@ -84,7 +84,9 @@ $localProps = Join-Path $mappedAndroidDir 'local.properties'
 "sdk.dir=$($env:ANDROID_HOME.Replace('\','\\'))" | Set-Content -Encoding ASCII $localProps
 Push-Location $mappedAndroidDir
 try {
-    & (Join-Path $mappedTools 'gradle-8.10.2\bin\gradle.bat') --no-daemon assembleDebug
+    $buildTasks = @('assembleDebug')
+    if ($Lint) { $buildTasks += 'lintDebug' }
+    & (Join-Path $mappedTools 'gradle-8.10.2\bin\gradle.bat') --no-daemon @buildTasks
     if ($LASTEXITCODE -ne 0) { throw 'Android debug APK build failed.' }
 } finally {
     Pop-Location

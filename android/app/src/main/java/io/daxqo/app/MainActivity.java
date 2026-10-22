@@ -73,11 +73,16 @@ public final class MainActivity extends Activity {
         consumePairIntent(getIntent());
         buildView();
         prepareAndLoadGui();
+        if (ControlActivity.ACTION_CONTROL.equals(getIntent().getAction())) {
+            startActivity(new Intent(this, ControlActivity.class));
+            setIntent(new Intent(this, MainActivity.class));
+        }
     }
 
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(new Intent(this, MainActivity.class));
+        if (ControlActivity.ACTION_CONTROL.equals(intent.getAction())) startActivity(new Intent(this, ControlActivity.class));
         if (consumePairIntent(intent)) prepareAndLoadGui();
     }
 
@@ -117,6 +122,19 @@ public final class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.WHITE);
+        LinearLayout nativeActions = new LinearLayout(this);
+        nativeActions.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        nativeActions.setPadding(12, 0, 12, 0);
+        TextView brand = new TextView(this);
+        brand.setText("达序 DAXQO");
+        brand.setTextSize(15);
+        brand.setTextColor(Color.rgb(35, 48, 64));
+        nativeActions.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
+        Button deviceControl = new Button(this);
+        deviceControl.setText("手机控制");
+        deviceControl.setOnClickListener(v -> startActivity(new Intent(this, ControlActivity.class)));
+        nativeActions.addView(deviceControl);
+        root.addView(nativeActions, new LinearLayout.LayoutParams(-1, -2));
         connectionPanel = new LinearLayout(this);
         connectionPanel.setOrientation(LinearLayout.VERTICAL);
         connectionPanel.setGravity(Gravity.CENTER_VERTICAL);
@@ -205,7 +223,7 @@ public final class MainActivity extends Activity {
             }
             @Override public void onSafeBrowsingHit(WebView view, WebResourceRequest request,
                     int threatType, SafeBrowsingResponse callback) {
-                callback.backToSafety(true);
+                if (Build.VERSION.SDK_INT >= 27) callback.backToSafety(true);
             }
         });
         webView.addJavascriptInterface(new FileDownloads(), "DAXQOFiles");

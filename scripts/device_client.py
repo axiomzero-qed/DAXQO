@@ -1,5 +1,6 @@
 """Temporary USB development session. Local capability stays in process memory."""
 import json
+import getpass
 import os
 from pathlib import Path
 import shlex
@@ -38,7 +39,7 @@ def main():
     ports = {}
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        for port in (18880, 18882):
+        for port in (18880, 18882, 18883):
             forwarded = adb('forward', 'tcp:0', 'tcp:' + str(port))
             if not forwarded.isdigit(): raise RuntimeError('Invalid forwarding result')
             ports[port] = forwarded
@@ -54,8 +55,12 @@ def main():
                 else:
                     path = command.get('path', '/api/status')
                     if not path.startswith(('/api/', '/healthz')): raise ValueError('Invalid API path')
-                    port = 18882 if command.get('target') == 'runtime' else 18880
+                    port = {'runtime': 18882, 'android': 18883}.get(command.get('target'), 18880)
                     payload = command.get('body')
+                    if command.get('action') == 'configure-mail':
+                        if path != '/api/remote/settings': raise ValueError('Invalid settings path')
+                        payload = dict(payload or {})
+                        payload['password'] = getpass.getpass('Mail authorization code (hidden): ')
                     if command.get('manifest'):
                         payload = json.loads(Path(command['manifest']).read_text(encoding='utf-8'))
                     binary = Path(command['uploadFile']).read_bytes() if command.get('uploadFile') else None

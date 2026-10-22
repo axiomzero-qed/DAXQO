@@ -26,7 +26,7 @@ from urllib.request import (HTTPRedirectHandler, ProxyHandler, Request,
                             build_opener)
 
 VERSION = "0.163.0"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 REGISTRY = "registry.npmjs.org"
 BACKEND_PORT = 18880
 FLAT_FILES = (
@@ -34,7 +34,10 @@ FLAT_FILES = (
     "test_supervisor.py", "test_runtime_control.py", "models-deepseek.json",
     "WORKSPACE_AGENTS.md",
     "task_services.py", "test_task_services.py",
+    "android_mcp_server.py", "test_android_mcp.py", "remote_protocol.py", "test_remote_protocol.py", "email_control.py", "test_email_control.py",
+    "test_remote_email_mcp.py",
 )
+SCRIPT_FLAT_FILES = ("remote_email_mcp.py",)
 SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
 MAX_METADATA = 4 * 1024 * 1024
 MAX_TARBALL = 1024 * 1024 * 1024
@@ -148,6 +151,14 @@ def _source_files(repo: Path) -> list[tuple[Path, str]]:
         source = backend / name
         if not _regular_file(source):
             raise InstallError(f"Required backend source is missing or unsafe: {name}")
+        files.append((source, name))
+    scripts = repo / "scripts"
+    if scripts.is_symlink() or not scripts.is_dir():
+        raise InstallError("scripts source directory is missing or unsafe")
+    for name in SCRIPT_FLAT_FILES:
+        source = scripts / name
+        if not _regular_file(source):
+            raise InstallError(f"Required script source is missing or unsafe: {name}")
         files.append((source, name))
     static = backend / "static"
     if static.is_symlink() or not static.is_dir():

@@ -8,6 +8,12 @@
 
 DAXQO 是面向手机的 Agent 工作台：Android 提供持续对话与成果界面，工具在手机已有的 Linux 环境执行，模型通过用户配置的 API 接入。项目采用 [MIT 许可证](LICENSE)；仓库地址为 [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO)。第三方依赖见[第三方说明](THIRD_PARTY_NOTICES.md)。
 
+当前源码正在开发 V0.4，入口见[V0.4 安装、权限与远程控制指南](docs/V0.4.md)。V0.4 增加手机端原生控制和邮件远程控制。GitHub 上现有的 [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) 仍是 V0.3 APK，并非 V0.4。要构建 V0.4，必须使用包含 V0.4 改动的当前源码：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\android\build.ps1
+```
+
 ## 快速开始
 
 1. 在已运行的 Linux 环境中，从仓库根目录安装 DAXQO（Python 3.10+）：
@@ -16,7 +22,7 @@ DAXQO 是面向手机的 Agent 工作台：Android 提供持续对话与成果�
    python3 scripts/install_linux.py
    ```
 
-2. 下载并安装 [V0.3 Android APK](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0)。这是开发签名预览包。Codex runtime 是独立依赖；Linux 安装器会从官方 npm registry 获取固定版本，或复用现有官方 runtime。默认执行策略为 `danger-full-access`，运行任务可访问该 Linux 用户可访问的文件和进程。
+2. 可下载并安装 [V0.3 Android APK](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0)，这是开发签名预览包，也是当前 GitHub release；它不包含 V0.4。要使用 V0.4，请从当前源码构建 APK（见上面的构建命令）。Codex runtime 是独立依赖；Linux 安装器会从官方 npm registry 获取固定版本，或复用现有官方 runtime。默认执行策略为 `danger-full-access`，运行任务可访问该 Linux 用户可访问的文件和进程。
 3. 生成一次性 Android 配对链接，并仅在自己的 DAXQO App 中导入：
 
    ```sh
@@ -29,7 +35,7 @@ DAXQO 是面向手机的 Agent 工作台：Android 提供持续对话与成果�
 
 完整选项见[中文 Linux 安装说明](docs/install.md#中文)和[English Linux install guide](docs/install.md#english)；Android 构建与安全边界见[Android 说明](docs/android-runtime.md#中文) / [Android runtime guide](docs/android-runtime.md#english)。
 
-## V0.3 功能
+## V0.3 已发布功能 / Released V0.3 features
 
 - 浅色移动界面和左侧箭头品牌图标；会话、历史、设置、文件、定时任务和运行详情分区显示。
 - 执行中追加要求、沿原会话继续追问、持久化消息/任务/文件；查看文本成果、下载文件、停止任务、确认工具操作及恢复中断任务。
@@ -40,6 +46,10 @@ DAXQO 是面向手机的 Agent 工作台：Android 提供持续对话与成果�
 - 模型 API key 由用户在 DAXQO GUI 中配置并保存在 Linux 端；Android 使用本机配对 capability。
 
 V0.3 真机结果和未完成项目见[V0.3 验收记录](docs/V0.3-ACCEPTANCE.md)。此前已验证关闭 App、撤掉电脑调试通道后，手机仍能执行一次定时任务。Android App 管理已运行 Linux 环境中的 DAXQO 服务；不能创建、唤醒或保证厂商 Linux 容器持续运行，也不承诺 24 小时保活。
+
+## V0.4 当前开发 / Current V0.4 development
+
+V0.4 在现有手机 Linux 环境上增加原生手机控制及邮件远程控制入口。辅助功能默认关闭，须由用户在 Android 系统设置中手动授权；远程邮件需要单独配置邮箱和可信联系人。联系人获得的是 Harness 权限，并非隔离沙箱权限。已完成签名 `status` 命令及签名状态回信的真实邮件验证；完整邮件视觉任务到手机执行再到签名结果的闭环仍待下一轮真机检查。详见[V0.4 指南](docs/V0.4.md)。V0.4 当前源码可构建；V0.3 release 不是 V0.4 APK。
 
 ## 仓库结构
 
@@ -57,7 +67,7 @@ docs/              接口、安装、平台边界与验收说明
 
 ```sh
 cd backend
-python3 -m unittest test_server test_supervisor test_runtime_control test_task_services
+python3 -m unittest test_server test_supervisor test_runtime_control test_task_services test_android_mcp test_remote_protocol test_email_control test_remote_email_mcp
 ```
 
 测试使用明确标记的协议/进程夹具，不替代真实手机或模型验收。Windows 若尚无 Android 构建工具，可运行：
@@ -74,6 +84,12 @@ powershell -ExecutionPolicy Bypass -File .\android\build.ps1 -InstallTools
 
 DAXQO is a mobile Agent workspace. Its Android app provides persistent conversations and a results interface; tools run inside a Linux environment already available on the phone, and models are connected through an API configured by the user. The project uses the [MIT License](LICENSE); its repository is [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO). See [third-party notices](THIRD_PARTY_NOTICES.md) for external dependencies.
 
+The current source is developing V0.4; see the [V0.4 installation, permissions, and remote-control guide](docs/V0.4.md). V0.4 adds native phone control and email remote control. The existing [V0.3 GitHub release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) is still a V0.3 APK, not V0.4. To build V0.4, use the current source containing the V0.4 changes:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\android\build.ps1
+```
+
 ### Quick start
 
 1. In an already-running Linux environment, install DAXQO from the repository root (Python 3.10 or newer):
@@ -82,7 +98,7 @@ DAXQO is a mobile Agent workspace. Its Android app provides persistent conversat
    python3 scripts/install_linux.py
    ```
 
-2. Download and install the [V0.3 Android APK](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0), a development-signed preview build. Codex runtime is an independent dependency; the Linux installer fetches a pinned release from the official npm registry or reuses an existing official runtime. The default execution policy is `danger-full-access`, which lets tasks access files and processes available to that Linux user.
+2. You may download and install the [V0.3 Android APK](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0), a development-signed preview and the current GitHub release; it does not include V0.4. To use V0.4, build an APK from the current source using the command above. Codex runtime is an independent dependency; the Linux installer fetches a pinned release from the official npm registry or reuses an existing official runtime. The default execution policy is `danger-full-access`, which lets tasks access files and processes available to that Linux user.
 3. Create a one-time Android pairing link and import it only into your DAXQO app:
 
    ```sh
@@ -95,7 +111,7 @@ DAXQO is a mobile Agent workspace. Its Android app provides persistent conversat
 
 See the [English Linux installation guide](docs/install.md#english) and the [English Android runtime guide](docs/android-runtime.md#english) for details.
 
-### V0.3 features
+### V0.3 released features
 
 - A light mobile interface with the standalone left-arrow brand icon; conversations, history, settings, files, schedules, and run details are presented separately.
 - Add instructions while a task is running and continue in its existing conversation. Messages, tasks, and files persist. View text results, download files, stop tasks, approve tool actions, and resume interrupted tasks.
@@ -106,6 +122,10 @@ See the [English Linux installation guide](docs/install.md#english) and the [Eng
 - Users configure model API keys in the DAXQO GUI; keys remain on Linux. Android uses a local pairing capability.
 
 See the [V0.3 acceptance record](docs/V0.3-ACCEPTANCE.md) for device results and remaining checks. Earlier acceptance confirmed that a scheduled task completed on the phone with the app closed and PC forwarding removed. The Android app manages DAXQO services inside an already-running Linux environment. It cannot create, wake, or guarantee the availability of a vendor-managed Linux container, and it does not promise 24-hour uptime.
+
+### Current V0.4 development
+
+V0.4 adds native phone control and an email remote-control entry point on top of the existing phone Linux environment. Accessibility is off by default and must be enabled manually in Android system settings. Email control requires separate mailbox and trusted-contact configuration. A trusted contact receives Harness permissions, not an isolated sandbox. A real signed `status` command and signed status reply have been verified by email; the full email visual-task, phone-execution, and signed-result loop remains pending another device run. See the [V0.4 guide](docs/V0.4.md). The current V0.4 source can be built; the V0.3 release is not a V0.4 APK.
 
 ### Repository layout
 
@@ -123,7 +143,7 @@ The backend uses the Python standard library. Task execution additionally requir
 
 ```sh
 cd backend
-python3 -m unittest test_server test_supervisor test_runtime_control test_task_services
+python3 -m unittest test_server test_supervisor test_runtime_control test_task_services test_android_mcp test_remote_protocol test_email_control test_remote_email_mcp
 ```
 
 Tests use clearly labeled protocol/process fixtures and do not replace real-device or model acceptance. On Windows, if Android build tools are not installed, run:

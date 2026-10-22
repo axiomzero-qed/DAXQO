@@ -1,0 +1,10 @@
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut android:shortcutId="phone_control"
+        android:enabled="true"
+        android:icon="@drawable/ic_launcher_foreground"
+        android:shortcutShortLabel="@string/phone_control_shortcut"
+        android:shortcutLongLabel="@string/phone_control_shortcut">
+        <intent android:action="io.daxqo.app.CONTROL"
+            android:targetPackage="io.daxqo.app" android:targetClass="io.daxqo.app.MainActivity" />
+    </shortcut>
+</shortcuts>

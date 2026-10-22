@@ -26,6 +26,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 from task_services import TaskServices
+from email_control import MailControlService
 
 RPC_TIMEOUT = 30.0
 MAX_BODY = 1024 * 1024
@@ -183,6 +184,13 @@ def _linux_signal_identity(identity: tuple[int, int, int], sig: int) -> bool:
 class AppServer:
     """One app-server subprocess; responses and notifications are demultiplexed safely."""
 
+    # These are the only request methods with the {decision: accept|decline}
+    # response contract exposed by the current DAXQO approval UI. User-input,
+    # permission and MCP elicitation requests have different public schemas.
+    APPROVAL_REQUEST_METHODS = frozenset({
+        "item/commandExecution/requestApproval", "item/fileChange/requestApproval",
+    })
+
     def __init__(self, command: list[str], codex_home: Path, on_event: Callable[[dict], None],
                  on_request: Callable[[dict], None] | None = None, on_disconnect: Callable[[], None] | None = None,
                  extra_env: dict[str, str] | None = None):
@@ -286,12 +294,15 @@ class AppServer:
 
     def _handle_server_request(self, msg: dict[str, Any]) -> None:
         method = msg.get("method", "")
-        if "requestapproval" not in method.lower():
+        if method not in self.APPROVAL_REQUEST_METHODS:
             self.respond(msg.get("id"), error={"code": -32601, "message": "Unsupported app-server request"})
             return
         request_id = msg.get("id")
         key = str(request_id)
-        params = msg.get("params") or {}
+        params = msg.get("params", {})
+        if not isinstance(params, dict):
+            self.respond(request_id, error={"code": -32602, "message": "Invalid approval request params"})
+            return
         try:
             self.on_request({"id": request_id, "key": key, "method": method, "params": params})
         except Exception:
@@ -625,6 +636,7 @@ class Harness:
         self.pending_approvals: dict[str, dict[str, Any]] = {}
         self._loaded_threads: set[str] = set()
         self.services = TaskServices(self)
+        self.remote = MailControlService(self)
         self.engine_path = shutil.which(codex) if not Path(codex).is_absolute() else (codex if Path(codex).is_file() else None)
         self.engine = test_engine
         if self.engine:
@@ -801,11 +813,12 @@ class Harness:
         compact = settings.get("autoCompactTokens", 32000)
         context_window = settings.get("contextWindow", 65536)
         content = (f"model_provider = {json.dumps(provider_id)}\n"
+                   'approval_policy = "on-request"\n'
                    f"model = {json.dumps(self.provider['model'])}\n"
                    f"model_auto_compact_token_limit = {int(compact)}\n"
                    f"model_context_window = {int(context_window)}\n"
                    "tool_output_token_limit = 2000\n"
-                   f"developer_instructions = \"For long tasks, give the user a brief public progress update after major steps and when waiting or blocked. Delegate independent research or checks to at most {agent_threads} subagents when useful; keep their results concise and do not recursively delegate. Handle simple tasks directly. Never reveal hidden reasoning or credentials.\"\n"
+                   f"developer_instructions = \"For long tasks, give brief public progress after major steps and when blocked. Delegate independent checks to at most {agent_threads} subagents when useful; do not recursively delegate. Handle simple tasks directly. For Android tasks use the daxqo_android MCP tools in an observe-action-observe loop; use screenshots for visual checks. If locked, paused, secure, or needs_user, report that the user must unlock or confirm on the phone and stop automation. Never bypass device security or use shell/adb to grant permissions. Never reveal hidden reasoning or credentials.\"\n"
                    "preferred_auth_method = \"apikey\"\n"
                    "forced_login_method = \"api\"\n"
                    f"{catalog_setting}"
@@ -820,6 +833,23 @@ class Harness:
                    "max_depth = 1\n\n"
                    "[analytics]\n"
                    "enabled = false\n\n"
+                   "[mcp_servers.daxqo_android]\n"
+                   f"command = {json.dumps(sys.executable)}\n"
+                   f"args = {json.dumps([str(Path(__file__).resolve().parent / 'android_mcp_server.py'), '--state-dir', str(self.state), '--port', '18883'])}\n"
+                   # Authorization is limited to our fixed stdio adapter and its
+                   # three bounded tools. Android still checks the user's native
+                   # control switch and all lock/sensitive-screen guards per call.
+                   # Keep every other server/tool interactive by default.
+                   'enabled_tools = ["android_status", "android_observe", "android_action"]\n'
+                   'default_tools_approval_mode = "prompt"\n'
+                   "startup_timeout_sec = 10\n"
+                   "tool_timeout_sec = 20\n\n"
+                   "[mcp_servers.daxqo_android.tools.android_status]\n"
+                   'approval_mode = "approve"\n\n'
+                   "[mcp_servers.daxqo_android.tools.android_observe]\n"
+                   'approval_mode = "approve"\n\n'
+                   "[mcp_servers.daxqo_android.tools.android_action]\n"
+                   'approval_mode = "approve"\n\n'
                    f"[model_providers.{provider_id}]\n"
                    f"name = {json.dumps(provider_name)}\n"
                    f"base_url = {json.dumps(self.provider['baseUrl'])}\n"
@@ -1309,7 +1339,7 @@ class Harness:
         if e and e.account_error: account["error"] = e.account_error
         active_rows = self.store.active_rows()
         active = next((r for r in active_rows if r["id"] == self.active_task_id), active_rows[0] if active_rows else None)
-        return {"app": {"name": "DAXQO", "version": "0.3.0"}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
+        return {"app": {"name": "DAXQO", "version": "0.4.0"}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
                 "engine": {"installed": bool(self.engine_path or self.engine), "version": e.version if e else None, "connected": bool(e and e.connected)},
                 "account": account, "activeTaskId": active["id"] if active else None, "activeTaskIds": [r["id"] for r in active_rows],
                 "workspace": str(self.workspace),
@@ -1628,7 +1658,7 @@ class Harness:
 
 def create_handler(harness: Harness):
     class Handler(BaseHTTPRequestHandler):
-        server_version = "DAXQO/0.3"
+        server_version = "DAXQO/0.4"
         def log_message(self, fmt: str, *args: Any) -> None:
             # Avoid request bodies, headers, auth values, and URL query strings in logs.
             sys.stderr.write(f"{self.client_address[0]} {self.command} {self.path.split('?')[0]}\n")
@@ -1687,6 +1717,7 @@ def create_handler(harness: Harness):
                 self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(raw); return
             if not self._authorized(): return
             if harness.services.handle_http(self, "GET", path): return
+            if harness.remote.handle_http(self, "GET", path): return
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query, keep_blank_values=True)
             if path == "/api/files":
                 try: return self._json(200, harness.list_workspace_files(query.get("path", [""])[0]))
@@ -1733,6 +1764,7 @@ def create_handler(harness: Harness):
             if not self._authorized(): return
             path = urllib.parse.urlsplit(self.path).path
             if harness.services.handle_http(self, "POST", path): return
+            if harness.remote.handle_http(self, "POST", path): return
             try:
                 if path == "/api/login/start":
                     if not harness.engine: raise ValueError("Codex app-server is unavailable")
@@ -1800,6 +1832,7 @@ def main() -> int:
     try:
         ensure_runtime_control(Path(__file__).resolve().parent, state, workspace, args.port)
         harness.services.start()
+        harness.remote.start()
         server_thread.join()
     except KeyboardInterrupt:
         request_shutdown()
@@ -1808,6 +1841,7 @@ def main() -> int:
         signal.signal(signal.SIGTERM, previous_sigterm)
         http.server_close()
         harness.services.close()
+        harness.remote.close()
         if harness.engine: harness.engine.close()
     return 0
 

@@ -319,7 +319,7 @@ def run(expected_sha256: str) -> None:
                 check_idle(status)
                 backend_identity(app, status)
                 bridge_status = http_json(RUNTIME_PORT, "/api/runtime/status", capability, timeout=.6)
-                return bridge_status.get("app") == {"name": "DAXQO", "version": "0.3.0"}
+                return bridge_status.get("app") == {"name": "DAXQO", "version": "0.4.0"}
             except (RefreshError, OSError):
                 return False
 

@@ -101,6 +101,48 @@ def pid_running(pid):
     return True
 
 
+class AppServerRequestBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.queued = Mock()
+        self.engine = server.AppServer(["unused-fixture"], Path("unused-fixture-home"), lambda _: None,
+                                       on_request=self.queued)
+        self.engine.respond = Mock()
+
+    def test_only_implemented_decision_requests_reach_approval_ui(self):
+        for method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
+            with self.subTest(method=method):
+                self.queued.reset_mock(); self.engine.respond.reset_mock()
+                params = {"threadId": "thread-fixture", "turnId": "turn-fixture", "title": "Fixture action"}
+                self.engine._handle_server_request({"id": 17, "method": method, "params": params})
+                self.queued.assert_called_once_with({"id": 17, "key": "17", "method": method, "params": params})
+                self.engine.respond.assert_not_called()
+
+    def test_user_input_and_unknown_approval_like_requests_are_never_auto_accepted(self):
+        for method in ("item/tool/requestUserInput", "mcpServer/elicitation/request",
+                       "item/permissions/requestApproval", "fixture/requestApproval",
+                       "item/commandExecution/requestApproval/extra", "item/commandexecution/requestapproval"):
+            with self.subTest(method=method):
+                self.queued.reset_mock(); self.engine.respond.reset_mock()
+                # A tool/server name in question text is not evidence of authorization.
+                params = {"threadId": "thread-fixture", "questions": [{"id": "daxqo_android",
+                    "question": "Accept android_action?", "options": [{"label": "Accept"}, {"label": "Decline"}]}]}
+                self.engine._handle_server_request({"id": "untrusted", "method": method, "params": params})
+                self.queued.assert_not_called()
+                self.engine.respond.assert_called_once_with("untrusted", error={"code": -32601, "message": "Unsupported app-server request"})
+
+    def test_supported_request_rejects_malformed_params_and_queue_failure(self):
+        for params in (None, [], ["bad"], "bad", 1):
+            with self.subTest(params=params):
+                self.engine.respond.reset_mock()
+                self.engine._handle_server_request({"id": 5, "method": "item/fileChange/requestApproval", "params": params})
+                self.engine.respond.assert_called_once_with(5, error={"code": -32602, "message": "Invalid approval request params"})
+        self.queued.assert_not_called()
+        self.queued.side_effect = RuntimeError("fixture failure")
+        self.engine.respond.reset_mock()
+        self.engine._handle_server_request({"id": 6, "method": "item/fileChange/requestApproval", "params": {}})
+        self.engine.respond.assert_called_once_with(6, error={"code": -32603, "message": "Unable to queue approval request"})
+
+
 class HarnessTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -703,7 +745,7 @@ for line in sys.stdin:
             with urllib.request.urlopen(req) as response:
                 result = json.loads(response.read())
                 self.assertTrue(result["engine"]["connected"])
-                self.assertEqual(result["app"], {"name":"DAXQO", "version":"0.3.0"})
+                self.assertEqual(result["app"], {"name":"DAXQO", "version":"0.4.0"})
         finally:
             http.shutdown(); http.server_close()
 
@@ -855,6 +897,22 @@ for line in sys.stdin:
         for model in catalog["models"]:
             self.assertEqual(model["multi_agent_version"], "v1")
             self.assertFalse(model["supports_search_tool"])
+
+    def test_android_mcp_preapproval_is_limited_to_fixed_adapter_and_three_tools(self):
+        self.harness._write_codex_config()
+        config = (self.harness.codex_home / "config.toml").read_text(encoding="utf-8")
+        self.assertIn('approval_policy = "on-request"', config)
+        self.assertNotIn('approval_policy = "never"', config)
+        block = config.split("[mcp_servers.daxqo_android]\n", 1)[1].split("\n[", 1)[0]
+        self.assertIn("command = " + json.dumps(sys.executable), block)
+        self.assertIn("args = " + json.dumps([str(Path(server.__file__).resolve().parent / "android_mcp_server.py"),
+            "--state-dir", str(self.harness.state), "--port", "18883"]), block)
+        self.assertIn('enabled_tools = ["android_status", "android_observe", "android_action"]', block)
+        self.assertIn('default_tools_approval_mode = "prompt"', block)
+        for tool in ("android_status", "android_observe", "android_action"):
+            self.assertIn("[mcp_servers.daxqo_android.tools." + tool + ']\napproval_mode = "approve"', config)
+        self.assertEqual(config.count('approval_mode = "approve"'), 3)
+        self.assertNotIn(self.harness.capability, config)
 
     def test_initial_attachment_message_separates_display_text_from_native_path(self):
         body = {"prompt": ""}
