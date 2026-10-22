@@ -70,7 +70,7 @@ public final class ControlActivity extends Activity {
         });
         button(root, "3  检查电池与后台设置", v -> openSettings(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
         button(root, "添加桌面控制入口", v -> pinShortcut());
-        root.addView(text("锁屏时只尝试亮屏，请你亲自解锁。支付、密码、身份认证和系统授权需要你手动完成；检测到这些界面时会暂停控制，处理完后回到这里继续。", 14, Color.rgb(80, 90, 105)));
+        root.addView(text("手机未设置安全密码且没有 SIM 锁时，远程唤醒会尝试通过系统关闭滑动锁屏。安全密码、SIM 保护或无法确认的状态需要你亲自处理。支付、密码、身份认证和系统授权仍需手动确认，保护暂停后请回到这里继续。", 14, Color.rgb(80, 90, 105)));
         root.addView(text("后台运行受手机系统和电池策略影响。请按需在系统应用信息中允许后台运行，并保持已有 Linux 环境在线。达序不会更改厂商容器或绕过系统权限。", 14, Color.rgb(80, 90, 105)));
         activity = text("", 13, Color.rgb(100, 110, 125));
         activity.setPadding(0, dp(16), 0, dp(8));
@@ -116,7 +116,10 @@ public final class ControlActivity extends Activity {
         String pairing = state.optBoolean("paired") ? "" : "\n本机服务：待配对，请先返回任务界面连接";
         String notify = ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).areNotificationsEnabled() ? "已允许" : "未允许";
         String battery = state.optBoolean("batteryOptimizationsIgnored") ? "不受电池优化限制" : "仍受电池优化限制";
-        status.setText(accessibility + "\n" + control + pairing + "\n通知：" + notify + "\n后台：" + battery + (state.optBoolean("locked") ? "\n请先亲自解锁手机" : ""));
+        boolean lockKnown = state.optBoolean("lockStateKnown", false);
+        boolean secure = state.optBoolean("secureLock", true) || state.optBoolean("deviceSecure", true);
+        String lock = !lockKnown ? "锁屏：状态未知，需亲自处理" : secure ? "锁屏：安全锁或 SIM 保护，需亲自解锁" : "锁屏：无安全密码，可尝试远程关闭滑动锁屏";
+        status.setText(accessibility + "\n" + control + pairing + "\n" + lock + "\n通知：" + notify + "\n后台：" + battery);
         toggle.setText(!connected ? "开启无障碍服务" : enabled ? "暂停手机控制" : reason.isEmpty() ? "开始手机控制" : "我已处理，继续控制");
         String last = state.optString("lastAction");
         String error = state.optString("lastError");

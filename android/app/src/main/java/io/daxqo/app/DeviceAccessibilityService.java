@@ -63,6 +63,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
     }
     @Override public void onDestroy() {
         if (current == this) current = null;
+        WakeActivity.finishActive();
         if (bridge != null) bridge.close();
         screenshots.shutdownNow();
         main.removeCallbacksAndMessages(null);
@@ -146,18 +147,26 @@ public final class DeviceAccessibilityService extends AccessibilityService {
     private interface Completion { void done(JSONObject response); }
     private void executeMain(String id, String action, JSONObject args, Completion callback) throws Exception {
         if (current != this) { callback.done(failure(id, "accessibility_unavailable", "请在系统设置中手动启用达序手机控制")); return; }
-        // Wake only lights the display; it never dismisses or types into keyguard.
+        // Wake may dismiss only a non-secure swipe screen through Android's
+        // official API. Secure/SIM/unknown states always remain user-controlled.
         if ("wake".equals(action)) {
-            if (!DeviceState.enabled(this)) { callback.done(paused(id)); return; }
+            if (!DeviceState.enabled(this) || !DeviceState.needsUser(this).isEmpty()) { callback.done(paused(id)); return; }
             PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
-            if (power == null || !power.isInteractive()) startActivity(new Intent(this, WakeActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_HISTORY));
-            main.postDelayed(() -> {
-                if (DeviceState.locked(this)) callback.done(failure(id, "locked", "屏幕已请求唤醒，请亲自解锁手机后继续"));
-                else {
-                    PowerManager state = (PowerManager) getSystemService(POWER_SERVICE);
-                    callback.done(state != null && state.isInteractive() ? success(id, DeviceState.status(this)) : failure(id, "wake_unavailable", "系统未允许唤醒，请亲自亮屏解锁"));
+            DeviceState.LockState lock = DeviceState.lockState(this);
+            long deadline = android.os.SystemClock.elapsedRealtime() + 3800;
+            boolean launch = power == null || !power.isInteractive() || lock.locked;
+            if (launch) {
+                WakeActivity.beginRequest(id, deadline);
+                try {
+                    startActivity(new Intent(this, WakeActivity.class).putExtra(WakeActivity.EXTRA_REQUEST_ID, id)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_HISTORY));
+                } catch (Exception ignored) {
+                    WakeActivity.finishActive();
+                    callback.done(failure(id, "wake_unavailable", "系统未允许打开唤醒界面，请在手机上检查后重试"));
+                    return;
                 }
-            }, 1800);
+            }
+            pollWake(id, deadline, launch, callback);
             return;
         }
         if (DeviceState.locked(this)) { callback.done(failure(id, "locked", "手机已锁定，请亲自解锁；达序不会绕过锁屏")); return; }
@@ -195,6 +204,29 @@ public final class DeviceAccessibilityService extends AccessibilityService {
                 return;
             default: callback.done(failure(id, "unsupported", "不支持的手机操作"));
         }
+    }
+    private void pollWake(String id, long deadline, boolean launchRequested, Completion callback) {
+        if (current != this) { WakeActivity.finishActive(); callback.done(failure(id, "accessibility_unavailable", "无障碍服务已断开，请检查手机")); return; }
+        if (!DeviceState.enabled(this) || !DeviceState.needsUser(this).isEmpty()) { WakeActivity.finishActive(); callback.done(paused(id)); return; }
+        DeviceState.LockState lock = DeviceState.lockState(this);
+        PowerManager power = (PowerManager) getSystemService(POWER_SERVICE);
+        boolean screenOn = power != null && power.isInteractive();
+        // The callback is not proof of dismissal. Require the real keyguard to
+        // be gone, the display awake, and the temporary activity fully closed.
+        if (lock.known && !lock.locked && screenOn && (!launchRequested || WakeActivity.hasStarted(id)) && !WakeActivity.isActive()) {
+            WakeActivity.finishActive();
+            callback.done(success(id, DeviceState.status(this)));
+            return;
+        }
+        if (android.os.SystemClock.elapsedRealtime() >= deadline) {
+            WakeActivity.finishActive();
+            if (!lock.known) callback.done(failure(id, "locked", "无法确认锁屏安全状态，请亲自亮屏解锁"));
+            else if (lock.locked) callback.done(failure(id, "locked", lock.secureLock || lock.deviceSecure
+                    ? "手机设有安全锁或 SIM 保护，请亲自解锁；达序不会自动确认" : "系统未关闭滑动锁屏，请在手机上检查后重试"));
+            else callback.done(failure(id, "wake_unavailable", "系统尚未完成唤醒，请在手机上检查后重试"));
+            return;
+        }
+        main.postDelayed(() -> pollWake(id, deadline, launchRequested, callback), 100);
     }
     private JSONObject paused(String id) {
         String reason = DeviceState.needsUser(this);

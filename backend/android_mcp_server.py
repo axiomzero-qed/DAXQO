@@ -190,7 +190,7 @@ TOOL_DEFINITIONS = [
          "includeTree": {"type": "boolean", "default": True},
          "includeScreenshot": {"type": "boolean", "default": False},
          "expectedPackage": {"type": "string", "maxLength": 255}}, "additionalProperties": False}},
-    {"name": "android_action", "description": "Perform one bounded Android action. Permission, login, payment, identity, or safety pauses are enforced by Android and cannot be resumed through this tool.",
+    {"name": "android_action", "description": "Perform one bounded Android action. On supported DAXQO builds, wake may dismiss a non-secure swipe lock through Android's official API while control is enabled. Verify the returned screen/lock state. Secure locks and DAXQO/Android permission, login, payment, identity, or safety pauses cannot be resumed through this tool.",
      "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
      "inputSchema": {"type": "object", "properties": {
          "action": {"type": "string", "enum": list(ACTION_NAMES)},
