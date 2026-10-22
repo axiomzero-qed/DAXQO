@@ -1,5 +1,11 @@
 import datetime as dt
+import base64
+import shutil
+import subprocess
+from email import policy
 from email.message import EmailMessage
+from email.parser import BytesParser
+from email.utils import format_datetime
 import json
 from pathlib import Path
 import sqlite3
@@ -10,10 +16,22 @@ from unittest.mock import patch
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+MAIL_LIBS = ROOT / ".tools" / "mail-libs"
+if MAIL_LIBS.is_dir(): sys.path.insert(0, str(MAIL_LIBS))
 sys.path.insert(0, str(ROOT / "backend"))
+import email_control
 from email_control import MailControlService
+from email_control import _verify_plain_email, _stamp
 from remote_protocol import sign, verify
 from server import Store
+
+try:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+except ImportError:
+    serialization = rsa = None
+
+OPENSSL = shutil.which("openssl")
 
 
 class FakeHarness:
@@ -71,6 +89,31 @@ class FakeIMAP:
     def logout(self): return ("BYE", [b"bye"])
 
 
+class FakeMailboxIMAP:
+    def __init__(self, messages):
+        self.messages = messages
+        self.full_fetches = 0
+
+    def search(self, *_args):
+        return "OK", [b" ".join(str(i).encode() for i in self.messages)]
+
+    def fetch(self, message_id, fields):
+        raw = self.messages[int(message_id)]
+        parsed = BytesParser(policy=policy.default).parsebytes(raw)
+        if fields == "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM MESSAGE-ID DATE)])":
+            header = b"".join((name + ": " + str(parsed.get(name, "")) + "\r\n").encode("utf-8")
+                               for name in ("Subject", "From", "Message-ID", "Date") if parsed.get(name) is not None) + b"\r\n"
+            return "OK", [(b"1 (BODY[HEADER.FIELDS] {" + str(len(header)).encode() + b"}", header), b")"]
+        if fields == "(RFC822.SIZE)":
+            return "OK", [b"1 (RFC822.SIZE " + str(len(raw)).encode() + b")"]
+        if fields.startswith("(BODY.PEEK[]"):
+            self.full_fetches += 1
+            return "OK", [(b"1 (BODY[] {" + str(len(raw)).encode() + b"}", raw), b")"]
+        raise AssertionError(f"unexpected FETCH: {fields}")
+
+    def logout(self): pass
+
+
 class MailControlTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -88,8 +131,8 @@ class MailControlTests(unittest.TestCase):
         FakeSMTP.instances.clear()
 
     def command_email(self, action="submit", *, sender="owner@example.org", contact="owner@example.org", secret=None,
-                      nonce=None, **fields):
-        stamp = dt.datetime.now(dt.timezone.utc)
+                      nonce=None, sent_at=None, **fields):
+        stamp = sent_at or dt.datetime.now(dt.timezone.utc)
         payload = {"v": 1, "action": action, "contact": contact, "nonce": nonce or uuid.uuid4().hex,
                    "sentAt": stamp.isoformat(), **fields}
         raw = json.dumps(sign(payload, secret or self.secret), ensure_ascii=False, separators=(",", ":"))
@@ -97,6 +140,8 @@ class MailControlTests(unittest.TestCase):
         msg["From"] = sender
         msg["To"] = "device@example.net"
         msg["Subject"] = "DAXQO/1 " + payload["nonce"]
+        msg["Message-ID"] = f"<{uuid.uuid4()}@example.test>"
+        msg["Date"] = dt.datetime.now(dt.timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
         msg.set_content(raw)
         return msg.as_bytes()
 
@@ -325,7 +370,7 @@ class MailControlTests(unittest.TestCase):
                 return ("OK", [b"1"] if criteria == ("ALL",) else [b""])
             def fetch(self, message_id, fields):
                 if fields == "(RFC822.SIZE)": return "OK", [b"1 (RFC822.SIZE " + str(len(raw)).encode() + b")"]
-                if fields == "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM)])":
+                if fields == "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM MESSAGE-ID DATE)])":
                     head = raw.split(b"\n\n", 1)[0] + b"\n\n"
                     return "OK", [(b"1 (BODY[HEADER.FIELDS (SUBJECT FROM)] {" + str(len(head)).encode() + b"}", head), b")"]
                 if fields.startswith("(BODY.PEEK[]"):
@@ -339,6 +384,23 @@ class MailControlTests(unittest.TestCase):
         self.assertEqual(len(self.harness.start_calls), 1)
         self.assertEqual(imap.criteria, [("ALL",), ("ALL",)])
 
+    def test_oversized_message_is_skipped_before_header_or_body_fetch(self):
+        class FakeIMAP:
+            later_fetches = []
+            def search(self, *_args): return "OK", [b"1"]
+            def fetch(self, _message_id, fields):
+                if fields == "(RFC822.SIZE)":
+                    return "OK", [b"1 (RFC822.SIZE " + str(96 * 1024 + 1).encode() + b")"]
+                self.later_fetches.append(fields)
+                raise AssertionError(f"oversized message must not be read: {fields}")
+            def logout(self): pass
+        imap = FakeIMAP()
+        with patch.object(self.service, "_connections", return_value=imap):
+            self.service.poll_once()
+        self.assertEqual(imap.later_fetches, [])
+        self.assertEqual(self.harness.start_calls, [])
+        self.assertEqual(self.service.public()["receipts"], [])
+
     def test_poll_uses_the_latest_hundred_matching_messages(self):
         raw = self.command_email(prompt="tail fixture", nonce="c" * 32)
         class FakeIMAP:
@@ -347,7 +409,7 @@ class MailControlTests(unittest.TestCase):
             def fetch(self, message_id, fields):
                 self.fetched_ids.append(int(message_id))
                 if fields == "(RFC822.SIZE)": return "OK", [b"1 (RFC822.SIZE " + str(len(raw)).encode() + b")"]
-                if fields == "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM)])":
+                if fields == "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM MESSAGE-ID DATE)])":
                     head = raw.split(b"\n\n", 1)[0] + b"\n\n"
                     return "OK", [(b"1 (BODY[HEADER.FIELDS (SUBJECT FROM)] {" + str(len(head)).encode() + b"}", head), b")"]
                 if fields.startswith("(BODY.PEEK[]"):
@@ -359,6 +421,182 @@ class MailControlTests(unittest.TestCase):
             self.service.poll_once()
         self.assertEqual(sorted(set(imap.fetched_ids)), list(range(6, 106)))
         self.assertEqual(len(self.harness.start_calls), 1)
+
+    def test_poll_records_trusted_ordinary_mail_once_without_reading_body(self):
+        mail = EmailMessage()
+        mail["From"] = "owner@example.org"
+        mail["To"] = "device@example.net"
+        mail["Subject"] = "写一篇文章 " + "恶意标题 " * 100
+        mail["Message-ID"] = "<ordinary-1@example.test>"
+        mail["Date"] = "Thu, 22 Oct 2026 00:00:00 +0000"
+        mail.set_content("This body must not be fetched.")
+        imap = FakeMailboxIMAP({1: mail.as_bytes()})
+        with patch.object(self.service, "_connections", return_value=imap):
+            self.service.poll_once()
+            self.service.poll_once()
+        self.assertEqual(imap.full_fetches, 0)
+        self.assertEqual(self.harness.start_calls, [])
+        receipts = self.service.public()["receipts"]
+        self.assertEqual(len(receipts), 1)
+        receipt = receipts[0]
+        self.assertEqual(set(receipt), {"id", "contactEmail", "subject", "status", "reason", "receivedAt"})
+        self.assertEqual(receipt["contactEmail"], "owner@example.org")
+        self.assertEqual(receipt["status"], "not_started")
+        self.assertIn("普通邮件未包含签名命令", receipt["reason"])
+        self.assertLessEqual(len(receipt["subject"]), 200)
+
+    def test_poll_does_not_record_unknown_or_disabled_sender(self):
+        messages = {}
+        for ident, sender in ((1, "stranger@example.org"), (2, "owner@example.org")):
+            mail = EmailMessage()
+            mail["From"] = sender
+            mail["Subject"] = "普通邮件"
+            mail["Message-ID"] = f"<untrusted-{ident}@example.test>"
+            mail.set_content("must not be fetched")
+            messages[ident] = mail.as_bytes()
+        self.service.contact_action(self.contact["id"], "toggle", enabled=False)
+        imap = FakeMailboxIMAP(messages)
+        with patch.object(self.service, "_connections", return_value=imap):
+            self.service.poll_once()
+        self.assertEqual(self.service.public()["receipts"], [])
+        self.assertEqual(imap.full_fetches, 0)
+        self.assertEqual(self.harness.start_calls, [])
+
+    def test_plain_email_disabled_records_header_only_and_never_reads_body(self):
+        mail = EmailMessage()
+        mail["From"] = "owner@example.org"
+        mail["To"] = "device@example.net"
+        mail["Subject"] = "Ordinary email"
+        mail["Message-ID"] = "<disabled@example.test>"
+        mail["Date"] = format_datetime(dt.datetime.now(dt.timezone.utc))
+        mail.set_content("do not fetch this body")
+        imap = FakeMailboxIMAP({1: mail.as_bytes()})
+        with patch.object(self.service, "_connections", return_value=imap):
+            self.service.poll_once()
+        self.assertEqual(imap.full_fetches, 0)
+        self.assertEqual(self.harness.start_calls, [])
+        self.assertEqual(self.service.public()["receipts"][0]["status"], "not_started")
+
+    def test_five_invalid_plain_candidates_do_not_starve_sixth_and_hmac_still_runs(self):
+        gmail = self.service.create_contact({"email": "owner@gmail.com"})
+        self.service.save_settings({"plainEmailEnabled": True})
+        since = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        invalid, messages = {}, {}
+        for ident in range(1, 6):
+            mail = EmailMessage()
+            mail["From"], mail["To"] = "owner@gmail.com", "device@example.net"
+            mail["Subject"], mail["Date"] = f"Invalid candidate {ident}", format_datetime(since + dt.timedelta(seconds=1))
+            mail["Message-ID"] = f"<invalid-{ident}@gmail.com>"
+            mail.set_content("untrusted candidate")
+            invalid[ident] = messages[ident] = mail.as_bytes(policy=policy.SMTP)
+        sixth = EmailMessage()
+        sixth["From"], sixth["To"] = "owner@gmail.com", "device@example.net"
+        sixth["Subject"], sixth["Date"] = "Sixth task", format_datetime(since + dt.timedelta(seconds=1))
+        sixth["Message-ID"] = "<sixth-valid@gmail.com>"
+        sixth.set_content("sixth valid task")
+        messages[6] = sixth.as_bytes(policy=policy.SMTP)
+        command = {"v": 1, "action": "submit", "contact": "owner@gmail.com", "nonce": uuid.uuid4().hex,
+                   "sentAt": dt.datetime.now(dt.timezone.utc).isoformat(), "prompt": "signed protocol task"}
+        signed = EmailMessage()
+        signed["From"], signed["To"] = "owner@gmail.com", "device@example.net"
+        signed["Subject"], signed["Date"] = "DAXQO/1 " + command["nonce"], format_datetime(dt.datetime.now(dt.timezone.utc))
+        signed["Message-ID"] = "<signed-hmac@gmail.com>"
+        signed.set_content(json.dumps(sign(command, gmail["pairingSecret"]), separators=(",", ":")))
+        messages[7] = signed.as_bytes(policy=policy.SMTP)
+
+        def fake_verify(raw, sender, receiver, start):
+            if raw in invalid.values(): raise ValueError("synthetic invalid DKIM")
+            message = BytesParser(policy=policy.default).parsebytes(raw)
+            return {"action": "submit", "prompt": "sixth valid task", "title": "Sixth task",
+                    "nonce": "plain:" + str(message["Message-ID"]), "messageId": str(message["Message-ID"]),
+                    "subject": str(message["Subject"])}
+        imap = FakeMailboxIMAP(messages)
+        with patch.object(self.service, "_connections", return_value=imap), patch("email_control.dkim", object()), \
+             patch("email_control._verify_plain_email", side_effect=fake_verify), patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service.poll_once()
+            self.service.poll_once()
+        prompts = [call["prompt"] for call in self.harness.start_calls]
+        self.assertEqual(len(prompts), 2)
+        self.assertTrue(any("sixth valid task" in prompt for prompt in prompts))
+        self.assertTrue(any("signed protocol task" in prompt for prompt in prompts))
+
+    def test_malformed_dkim_message_does_not_block_following_hmac_message(self):
+        gmail = self.service.create_contact({"email": "owner@gmail.com"})
+        self.service.save_settings({"plainEmailEnabled": True})
+        since = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        malformed = EmailMessage()
+        malformed["From"], malformed["To"] = "owner@gmail.com", "device@example.net"
+        malformed["Subject"], malformed["Date"] = "Malformed DKIM", format_datetime(since + dt.timedelta(seconds=1))
+        malformed["Message-ID"] = "<malformed-dkim@gmail.com>"
+        malformed.set_content("plain candidate")
+        command = {"v": 1, "action": "submit", "contact": "owner@gmail.com", "nonce": uuid.uuid4().hex,
+                   "sentAt": dt.datetime.now(dt.timezone.utc).isoformat(), "prompt": "later signed HMAC task"}
+        hmac_mail = EmailMessage()
+        hmac_mail["From"], hmac_mail["To"] = "owner@gmail.com", "device@example.net"
+        hmac_mail["Subject"], hmac_mail["Date"] = "DAXQO/1 " + command["nonce"], format_datetime(dt.datetime.now(dt.timezone.utc))
+        hmac_mail["Message-ID"] = "<following-hmac@gmail.com>"
+        hmac_mail.set_content(json.dumps(sign(command, gmail["pairingSecret"]), separators=(",", ":")))
+        class BrokenDKIM:
+            MessageFormatError = type("MessageFormatError", (Exception,), {})
+            def __init__(self, *_args, **_kwargs): raise self.MessageFormatError("malformed fixture")
+        imap = FakeMailboxIMAP({1: malformed.as_bytes(policy=policy.SMTP), 2: hmac_mail.as_bytes(policy=policy.SMTP)})
+        with patch.object(self.service, "_connections", return_value=imap), patch("email_control.dkim", BrokenDKIM), \
+             patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service.poll_once()
+        self.assertEqual(len(self.harness.start_calls), 1)
+        self.assertIn("later signed HMAC task", self.harness.start_calls[0]["prompt"])
+        self.assertIn("邮件签名格式无效", self.service.public()["receipts"][0]["reason"])
+
+    def test_same_second_disable_enable_invalidates_inflight_verification(self):
+        gmail = self.service.create_contact({"email": "owner@gmail.com"})
+        fixed_stamp = _stamp()
+        with patch("email_control._stamp", return_value=fixed_stamp):
+            self.service.save_settings({"plainEmailEnabled": True})
+            before = dict(self.service._config)
+            generation = self.service._auth_generation
+            since = dt.datetime.fromisoformat(fixed_stamp.replace("Z", "+00:00"))
+            mail = EmailMessage()
+            mail["From"], mail["To"] = "owner@gmail.com", "device@example.net"
+            mail["Subject"], mail["Date"] = "Toggle race", format_datetime(since + dt.timedelta(seconds=1))
+            mail["Message-ID"] = "<toggle-race@gmail.com>"
+            mail.set_content("must not launch")
+            raw = mail.as_bytes(policy=policy.SMTP)
+            def toggle_during_verify(*_args):
+                self.service.save_settings({"plainEmailEnabled": False})
+                self.service.save_settings({"plainEmailEnabled": True})
+                return {"action": "submit", "prompt": "must not launch", "title": "Toggle race",
+                        "nonce": "plain:toggle-race", "messageId": "<toggle-race@gmail.com>", "subject": "Toggle race"}
+            imap = FakeMailboxIMAP({1: raw})
+            with patch.object(self.service, "_connections", return_value=imap), patch("email_control.dkim", object()), \
+                 patch("email_control._verify_plain_email", side_effect=toggle_during_verify):
+                self.service.poll_once()
+            self.assertEqual(before, self.service._config)
+            self.assertGreater(self.service._auth_generation, generation)
+        self.assertEqual(self.harness.start_calls, [])
+        self.assertEqual(self.commands(), [])
+
+    def test_expired_rescan_of_known_signed_nonce_does_not_create_failure_receipt(self):
+        nonce = "d" * 32
+        self.service._process_email(self.command_email(prompt="first run", nonce=nonce))
+        old = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=601)
+        stale = self.command_email(prompt="historical", nonce=nonce, sent_at=old)
+        imap = FakeMailboxIMAP({1: stale})
+        with patch.object(self.service, "_connections", return_value=imap):
+            self.service.poll_once()
+        self.assertEqual(len(self.harness.start_calls), 1)
+        self.assertEqual(self.service.public()["receipts"], [])
+
+    def test_invalid_signature_gets_generic_local_receipt_without_execution(self):
+        raw = self.command_email(prompt="must not execute", secret="wrong synthetic signature key")
+        imap = FakeMailboxIMAP({1: raw})
+        with patch.object(self.service, "_connections", return_value=imap):
+            self.service.poll_once()
+        self.assertEqual(self.harness.start_calls, [])
+        receipts = self.service.public()["receipts"]
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0]["status"], "not_started")
+        self.assertIn("签名命令无效或已处理", receipts[0]["reason"])
+        self.assertNotIn("signature", json.dumps(receipts).lower())
 
     def test_redaction_happens_before_output_truncation(self):
         for credential in (self.cfg["password"], self.secret):
@@ -414,6 +652,224 @@ class MailControlTests(unittest.TestCase):
         self.assertEqual(FakeIMAP.instances[0].commands[0][0], "ID")
         self.assertEqual(FakeIMAP.instances[0].mailbox, "INBOX")
         self.assertEqual(FakeSMTP.instances[0].sent, [])
+
+
+@unittest.skipIf(email_control.dkim is None or (rsa is None and OPENSSL is None),
+                 "DKIM unavailable and neither cryptography nor openssl can create a test key")
+class PlainEmailAuthenticationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if rsa is not None:
+            cls.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
+                serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption())
+            cls._key_object = serialization.load_pem_private_key(cls.private_key, password=None)
+            cls.public_key = cls._key_object.public_key().public_bytes(
+                serialization.Encoding.DER, serialization.PublicFormat.PKCS1)
+        else:
+            cls.private_key = subprocess.run([OPENSSL, "genrsa", "2048"], capture_output=True, check=True).stdout
+            cls.public_key = subprocess.run([OPENSSL, "rsa", "-pubout", "-outform", "DER"],
+                                            input=cls.private_key, capture_output=True, check=True).stdout
+        cls.now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.harness = FakeHarness(Path(self.tmp.name))
+        self.addCleanup(self.harness.store.db.close)
+        self.service = MailControlService(self.harness)
+        self.service.save_settings({"enabled": True, "accountAddress": "device@example.net", "username": "fixture-user",
+                                    "imapHost": "imap.example.net", "imapPort": 993, "smtpHost": "smtp.example.net",
+                                    "smtpPort": 465, "password": "fixture-mail-password"})
+        created = self.service.create_contact({"email": "owner@gmail.com"})
+        self.contact = created["contact"]
+        self.contact_secret = created["pairingSecret"]
+        FakeSMTP.instances.clear()
+
+    def dnsfunc(self, name, timeout=5):
+        self.assertEqual(name.lower(), b"fixture._domainkey.gmail.com.")
+        return b"v=DKIM1; k=rsa; p=" + base64.b64encode(self.public_key)
+
+    def commands(self):
+        with self.harness.store.lock:
+            return [dict(row) for row in self.harness.store.db.execute("SELECT * FROM mail_commands ORDER BY received_at")]
+
+    def signed_email(self, *, body="please process this fixture", subject="Fixture request", sender="owner@gmail.com",
+                     receiver="device@example.net", date=None, include_headers=None, length=False, body_type="plain",
+                     attachment=False):
+        message = EmailMessage()
+        message["From"] = sender
+        message["To"] = receiver
+        message["Subject"] = subject
+        message["Date"] = format_datetime(date or self.now)
+        message["Message-ID"] = f"<{uuid.uuid4()}@gmail.com>"
+        if body_type == "plain":
+            message.set_content(body, cte="7bit")
+        elif body_type == "html":
+            message.set_content(body, subtype="html", cte="7bit")
+        if attachment:
+            message.add_attachment(b"fixture attachment", maintype="application", subtype="octet-stream", filename="fixture.bin")
+        raw = message.as_bytes(policy=policy.SMTP)
+        headers = include_headers or [b"from", b"to", b"subject", b"date", b"message-id",
+                                      b"content-type", b"mime-version", b"content-transfer-encoding"]
+        signature = email_control.dkim.sign(raw, b"fixture", b"gmail.com", self.private_key,
+                                            include_headers=headers, length=length)
+        return signature + raw
+
+    def verify_fixture(self, raw, *, sender="owner@gmail.com", since=None, now=None):
+        start = since or (self.now - dt.timedelta(days=2)).isoformat()
+        return _verify_plain_email(raw, sender, "device@example.net", start,
+                                   now=now or self.now, dnsfunc=self.dnsfunc)
+
+    def enable_plain(self):
+        self.service.save_settings({"plainEmailEnabled": True})
+
+    def test_real_dkim_verification_returns_subject_and_body(self):
+        raw = self.signed_email(body="Please review the local fixture.", subject="Check the report")
+        result = self.verify_fixture(raw)
+        self.assertEqual(result["action"], "submit")
+        self.assertEqual(result["title"], "Check the report")
+        self.assertIn("邮件主题：Check the report", result["prompt"])
+        self.assertIn("Please review the local fixture.", result["prompt"])
+        self.assertTrue(result["messageId"].startswith("<"))
+
+    def test_forged_authentication_results_and_tampered_fields_are_rejected(self):
+        unsigned = EmailMessage()
+        unsigned["From"] = "owner@gmail.com"
+        unsigned["To"] = "device@example.net"
+        unsigned["Subject"] = "No signature"
+        unsigned["Date"] = format_datetime(self.now)
+        unsigned["Message-ID"] = "<unsigned@gmail.com>"
+        unsigned["Authentication-Results"] = "mx.google.com; dkim=pass"
+        unsigned.set_content("untrusted body")
+        cases = [("spoofed auth-results", unsigned.as_bytes(policy=policy.SMTP), "owner@gmail.com")]
+        valid = self.signed_email()
+        cases.extend((
+            ("forged From", valid.replace(b"owner@gmail.com", b"attacker@gmail.com", 1), "owner@gmail.com"),
+            ("non-Gmail sender identity", valid, "owner@attacker.example"),
+            ("tampered To", valid.replace(b"device@example.net", b"other@example.net", 1), "owner@gmail.com"),
+            ("tampered Subject", valid.replace(b"Subject: Fixture request", b"Subject: New request", 1), "owner@gmail.com"),
+            ("tampered body", valid.replace(b"please process this fixture", b"please PROCESS this fixture", 1), "owner@gmail.com"),
+        ))
+        for label, raw, sender in cases:
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                self.verify_fixture(raw, sender=sender)
+
+    def test_unsigned_critical_headers_duplicates_and_body_length_tag_are_rejected(self):
+        no_to = self.signed_email(include_headers=[b"from", b"subject", b"date", b"message-id",
+                                                   b"content-type", b"mime-version", b"content-transfer-encoding"])
+        duplicate = self.signed_email().replace(b"Subject: Fixture request\r\n", b"Subject: Fixture request\r\nSubject: second\r\n", 1)
+        length_limited = self.signed_email(length=True)
+        for label, raw in (("unsigned To", no_to), ("duplicate Subject", duplicate), ("DKIM l tag", length_limited)):
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                self.verify_fixture(raw)
+
+    def test_old_pre_enable_and_future_dates_are_rejected(self):
+        since = self.now - dt.timedelta(hours=1)
+        cases = (
+            ("before enable", self.now - dt.timedelta(hours=2), since),
+            ("over 24 hours", self.now - dt.timedelta(hours=25), self.now - dt.timedelta(days=2)),
+            ("future over tolerance", self.now + dt.timedelta(seconds=121), self.now - dt.timedelta(days=2)),
+        )
+        for label, date, start in cases:
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                self.verify_fixture(self.signed_email(date=date), since=start.isoformat())
+
+    def test_html_is_text_only_and_attachments_or_oversized_prompt_are_rejected(self):
+        html = self.signed_email(body="<p>Keep this text</p><script>secret()</script>", body_type="html")
+        result = self.verify_fixture(html)
+        self.assertIn("Keep this text", result["prompt"])
+        self.assertNotIn("secret()", result["prompt"])
+        for label, raw in (("attachment", self.signed_email(attachment=True)),
+                           ("prompt limit", self.signed_email(body="x" * 8000))):
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                self.verify_fixture(raw)
+
+    def test_authenticated_email_runs_once_and_ack_and_result_use_fixed_recipient(self):
+        self.enable_plain()
+        since = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        raw = self.signed_email(body="Do the harmless fixture task.", subject="Fixture task", date=since + dt.timedelta(seconds=1))
+        imap = FakeMailboxIMAP({1: raw})
+        original = _verify_plain_email
+        verifier = lambda *args: original(*args, dnsfunc=self.dnsfunc)
+        with patch.object(self.service, "_connections", return_value=imap), \
+             patch("email_control._verify_plain_email", side_effect=verifier), \
+             patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service.poll_once()
+            self.service.poll_once()
+        self.assertEqual(len(self.harness.start_calls), 1)
+        self.assertEqual(self.commands()[0]["transport"], "plain")
+        self.assertEqual(self.commands()[0]["ack_status"], "sent")
+        self.assertEqual(len(FakeSMTP.instances), 1)
+        ack = FakeSMTP.instances[0].sent[0]
+        self.assertEqual(ack["To"], "owner@gmail.com")
+        self.assertIn("已验证你的 Gmail 身份", ack.get_content())
+        with self.harness.store.lock, self.harness.store.db:
+            self.harness.store.db.execute("UPDATE tasks SET status='completed',result=? WHERE id='task_1'",
+                                          ("Done " + self.contact_secret + " fixture-mail-password",))
+        with patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._deliver_finished()
+        self.assertEqual(len(FakeSMTP.instances), 2)
+        result_mail = FakeSMTP.instances[1].sent[0]
+        self.assertEqual(result_mail["To"], "owner@gmail.com")
+        self.assertIn("已完成", result_mail.get_content())
+        self.assertNotIn(self.contact_secret, result_mail.get_content())
+        self.assertNotIn("fixture-mail-password", result_mail.get_content())
+
+    def test_revocation_during_dkim_verification_prevents_launch(self):
+        self.enable_plain()
+        since = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        raw = self.signed_email(date=since + dt.timedelta(seconds=1))
+        imap = FakeMailboxIMAP({1: raw})
+        original = _verify_plain_email
+        def verify_then_revoke(*args):
+            result = original(*args, dnsfunc=self.dnsfunc)
+            self.service.contact_action(self.contact["id"], "toggle", enabled=False)
+            return result
+        with patch.object(self.service, "_connections", return_value=imap), \
+             patch("email_control._verify_plain_email", side_effect=verify_then_revoke):
+            self.service.poll_once()
+        self.assertEqual(self.harness.start_calls, [])
+        self.assertEqual(self.commands(), [])
+
+    def test_ambiguous_ack_send_is_never_retried(self):
+        self.enable_plain()
+        since = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        raw = self.signed_email(date=since + dt.timedelta(seconds=1))
+        imap = FakeMailboxIMAP({1: raw})
+        attempts = []
+        class UncertainSMTP(FakeSMTP):
+            def send_message(self, message):
+                attempts.append(message)
+                raise OSError("fixture uncertain delivery")
+        original = _verify_plain_email
+        verifier = lambda *args: original(*args, dnsfunc=self.dnsfunc)
+        with patch.object(self.service, "_connections", return_value=imap), \
+             patch("email_control._verify_plain_email", side_effect=verifier), \
+             patch("email_control.smtplib.SMTP_SSL", UncertainSMTP):
+            self.service.poll_once()
+            self.service.poll_once()
+        self.assertEqual(len(self.harness.start_calls), 1)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(self.commands()[0]["ack_status"], "uncertain")
+
+    def test_authenticated_attachment_sends_one_fixed_recipient_rejection(self):
+        self.enable_plain()
+        since = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        raw = self.signed_email(subject="Attachment request", date=since + dt.timedelta(seconds=1), attachment=True)
+        imap = FakeMailboxIMAP({1: raw})
+        original = _verify_plain_email
+        verifier = lambda *args: original(*args, dnsfunc=self.dnsfunc)
+        with patch.object(self.service, "_connections", return_value=imap), \
+             patch("email_control._verify_plain_email", side_effect=verifier), \
+             patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service.poll_once()
+            self.service.poll_once()
+        self.assertEqual(self.harness.start_calls, [])
+        self.assertEqual(len(FakeSMTP.instances), 1)
+        refusal = FakeSMTP.instances[0].sent[0]
+        self.assertEqual(refusal["To"], "owner@gmail.com")
+        self.assertIn("暂不支持附件", refusal.get_content())
+        self.assertEqual(self.commands()[0]["status"], "rejected")
 
 
 if __name__ == "__main__":

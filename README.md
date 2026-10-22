@@ -51,6 +51,8 @@ V0.3 真机结果和未完成项目见[V0.3 验收记录](docs/V0.3-ACCEPTANCE.m
 
 V0.4 在现有手机 Linux 环境上增加原生手机控制及邮件远程控制入口。辅助功能默认关闭，须由用户在 Android 系统设置中手动授权；远程邮件需要单独配置邮箱和可信联系人。联系人获得的是 Harness 权限，并非隔离沙箱权限。已在真机完成签名 Gmail 命令→本地视觉任务（20+22=42）→签名回信的闭环；设备与启动行为限制见[V0.4 指南](docs/V0.4.md)。V0.4 当前源码可构建；V0.3 release 不是 V0.4 APK。
 
+普通 Gmail 邮件也可直接提交新任务：在本机启用后，已登记联系人的邮件经完整 DKIM 验证自动执行，并回传可读接单与结果邮件。此流程已在真机验证；默认关闭，仅处理启用后的新邮件。
+
 ## 仓库结构
 
 ```text
@@ -126,6 +128,8 @@ See the [V0.3 acceptance record](docs/V0.3-ACCEPTANCE.md) for device results and
 ### Current V0.4 development
 
 V0.4 adds native phone control and an email remote-control entry point on top of the existing phone Linux environment. Accessibility is off by default and must be enabled manually in Android system settings. Email control requires separate mailbox and trusted-contact configuration. A trusted contact receives Harness permissions, not an isolated sandbox. The complete signed Gmail command → local visual task (20+22=42) → signed reply loop has passed on the device; device and app-launch limitations are documented in the [V0.4 guide](docs/V0.4.md). The current V0.4 source can be built; the V0.3 release is not a V0.4 APK.
+
+Ordinary Gmail messages can also submit new tasks. Once enabled locally, registered contacts' messages are verified with full DKIM before automatic execution, with readable acknowledgment and result replies. This flow passed on the device; it is off by default and handles only new mail after activation.
 
 ### Repository layout
 

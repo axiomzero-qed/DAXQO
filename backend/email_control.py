@@ -4,18 +4,23 @@ from __future__ import annotations
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
-from email.utils import getaddresses, make_msgid
+from email.utils import format_datetime, getaddresses, make_msgid, parsedate_to_datetime
+from html.parser import HTMLParser
 import datetime as dt
+import hashlib
 import imaplib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import smtplib
 import sqlite3
 import ssl
 import stat
+import sys
 import threading
+import time
 import uuid
 
 from remote_protocol import mail_payload_text, normalize_email, sign, verify
@@ -25,6 +30,133 @@ MAX_JSON = 64 * 1024
 POLL_SECONDS = 15
 DEFAULT_IMAP = "imap.163.com"
 DEFAULT_SMTP = "smtp.163.com"
+PLAIN_MAX_AGE = 24 * 60 * 60
+PLAIN_MAX_PROMPT = 8000
+
+# Optional, app-local dependencies; absence disables ordinary mail only.
+_mail_libs = Path(__file__).resolve().parent / "runtime" / "mail-libs"
+if _mail_libs.is_dir() and not _mail_libs.is_symlink():
+    sys.path.insert(0, str(_mail_libs))
+try:
+    import dkim
+except ImportError:
+    dkim = None
+
+
+class _MailHTMLText(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts, self.hidden = [], 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "head"): self.hidden += 1
+        if not self.hidden and tag in ("br", "p", "div", "li", "h1", "h2", "h3", "tr"): self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "head") and self.hidden: self.hidden -= 1
+        if not self.hidden and tag in ("p", "div", "li", "tr"): self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self.hidden: self.parts.append(data)
+
+
+class _AuthenticatedMailRejected(ValueError):
+    """A verified sender may receive a bounded explanation of invalid content."""
+    def __init__(self, reason, command):
+        super().__init__(reason)
+        self.command = command
+
+
+def _plain_date(message, since: str, now=None):
+    """Untrusted dates may exclude candidates, but never authorize them."""
+    try:
+        values = message.get_all("Date", [])
+        if len(values) != 1: raise ValueError
+        date = parsedate_to_datetime(str(values[0]))
+        if date.tzinfo is None: raise ValueError
+        date = date.astimezone(dt.timezone.utc)
+        start = dt.datetime.fromisoformat(since.replace("Z", "+00:00"))
+        current = now or dt.datetime.now(dt.timezone.utc)
+        age = (current - date).total_seconds()
+        if date < start or age > PLAIN_MAX_AGE or age < -120: raise ValueError
+        return date
+    except (ValueError, TypeError, OverflowError, AttributeError):
+        raise ValueError("仅处理启用后的新邮件，且邮件日期须在24小时内") from None
+
+
+def _verify_plain_email(raw: bytes, sender: str, receiver: str, since: str, *, now=None, dnsfunc=None) -> dict:
+    """Authenticate the complete received bytes before interpreting instructions.
+
+    Initial provider scope is personal Gmail. Never trust Authentication-Results
+    or a From header alone. DKIM verification is delegated to dkimpy.
+    """
+    if not raw or len(raw) > MAX_MESSAGE: raise ValueError("邮件超过96KiB限制")
+    if dkim is None: raise ValueError("普通邮件身份验证组件尚未安装")
+    if normalize_email(sender).rsplit("@", 1)[1] != "gmail.com":
+        raise ValueError("普通邮件自动处理目前仅支持已登记的 Gmail 联系人")
+    try:
+        msg = BytesParser(policy=policy.default).parsebytes(raw)
+    except Exception:
+        raise ValueError("邮件格式无效，未创建任务") from None
+    required = {"from", "to", "subject", "date", "message-id", "content-type", "mime-version"}
+    if any(len(msg.get_all(name, [])) != 1 for name in required):
+        raise ValueError("邮件关键头缺失或重复，无法确认身份")
+    for name in ("content-transfer-encoding", "sender", "reply-to"):
+        if len(msg.get_all(name, [])) > 1: raise ValueError("邮件头重复，无法确认身份")
+    addresses = [a for _, a in getaddresses(msg.get_all("From", [])) if a]
+    if addresses != [sender] or any(msg.get_all(name, []) for name in ("Resent-From", "Resent-To", "Resent-Date")):
+        raise ValueError("发件人与可信联系人不一致")
+    recipients = [a.lower() for _, a in getaddresses(msg.get_all("To", [])) if a]
+    if receiver not in recipients: raise ValueError("邮件须直接发送到本机邮箱")
+    _plain_date(msg, since, now)
+    message_id = str(msg["Message-ID"]).strip()
+    if not re.fullmatch(r"<[^<>\s\x00-\x20\x7f]{1,240}>", message_id):
+        raise ValueError("邮件唯一标识无效")
+    # An unsigned MIME interpretation header can change the meaning of a signed body.
+    if msg.get_all("Content-Transfer-Encoding", []): required.add("content-transfer-encoding")
+    try:
+        verifier = dkim.DKIM(raw, minkey=2048, timeout=5)
+    except Exception:
+        raise ValueError("邮件签名格式无效，未创建任务") from None
+    authenticated = False
+    signatures = [value for name, value in verifier.headers if name.lower() == b"dkim-signature"]
+    for index, value in enumerate(signatures[:5]):
+        try:
+            fields = dkim.parse_tag_value(value)
+            signed = {name.strip().lower().decode("ascii") for name in fields.get(b"h", b"").split(b":")}
+            if (fields.get(b"d", b"").lower() != b"gmail.com" or fields.get(b"a") != b"rsa-sha256"
+                    or b"l" in fields or not required.issubset(signed)):
+                continue
+            if verifier.verify(index, **({"dnsfunc": dnsfunc} if dnsfunc is not None else {})):
+                authenticated = True
+                break
+        except Exception:
+            continue
+    if not authenticated: raise ValueError("Gmail 发件签名未通过验证，未执行；请检查网络或使用 Agent/MCP")
+    if msg.get("Auto-Submitted", "no").lower() != "no" or msg.get("List-Id"):
+        raise ValueError("自动通知或邮件列表不作为任务执行")
+    subject = MailControlService._receipt_subject(msg["Subject"])
+    nonce = "plain:" + hashlib.sha256((sender + "\n" + message_id).encode("utf-8")).hexdigest()
+    command = {"action": "submit", "title": subject[:100] or "邮箱任务", "nonce": nonce,
+               "messageId": message_id, "subject": subject}
+    if any(part.get_content_disposition() == "attachment" or part.get_filename() for part in msg.walk()):
+        raise _AuthenticatedMailRejected("普通邮件任务暂不支持附件，请直接在正文说明任务", command)
+    part = msg.get_body(preferencelist=("plain", "html"))
+    if part is None: raise _AuthenticatedMailRejected("请在邮件正文中直接说明任务", command)
+    try:
+        text = part.get_content()
+        if not isinstance(text, str): raise ValueError
+        if part.get_content_type() == "text/html":
+            parser = _MailHTMLText()
+            parser.feed(text)
+            text = "".join(parser.parts)
+    except Exception:
+        raise _AuthenticatedMailRejected("邮件正文无法解码", command) from None
+    text = text.strip()
+    prompt = ("邮件主题：" + subject + "\n\n" + text).strip()
+    if not text or len(prompt) > PLAIN_MAX_PROMPT:
+        raise _AuthenticatedMailRejected("请提供非空正文，主题与正文合计不超过8000字", command)
+    return {**command, "prompt": prompt}
 
 
 def _stamp() -> str:
@@ -48,18 +180,30 @@ class MailControlService:
         self._harden_store_files()
         self.config_path = self.private_dir / "mail.json"
         self._auth_lock = threading.RLock()
+        self._auth_generation = 0
         self._stop = threading.Event()
         self._thread = None
         self._last_poll_at = None
+        self._plain_retry_after = {}
+        self._plain_cursor = 0
         with self.store.lock, self.store.db:
             self.store.db.execute("CREATE TABLE IF NOT EXISTS mail_contacts (id TEXT PRIMARY KEY,email TEXT NOT NULL UNIQUE,secret TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,deleted_at TEXT,deleted_email TEXT)")
             columns = {row[1] for row in self.store.db.execute("PRAGMA table_info(mail_contacts)")}
             if "deleted_at" not in columns: self.store.db.execute("ALTER TABLE mail_contacts ADD COLUMN deleted_at TEXT")
             if "deleted_email" not in columns: self.store.db.execute("ALTER TABLE mail_contacts ADD COLUMN deleted_email TEXT")
+            if "plain_since" not in columns: self.store.db.execute("ALTER TABLE mail_contacts ADD COLUMN plain_since TEXT")
             self.store.db.execute("CREATE TABLE IF NOT EXISTS mail_commands (id TEXT PRIMARY KEY,contact_id TEXT NOT NULL,nonce TEXT NOT NULL UNIQUE,action TEXT NOT NULL,task_id TEXT,status TEXT NOT NULL,received_at TEXT NOT NULL,replied_at TEXT,error TEXT,response_json TEXT,FOREIGN KEY(contact_id) REFERENCES mail_contacts(id))")
+            command_columns = {row[1] for row in self.store.db.execute("PRAGMA table_info(mail_commands)")}
+            for name, definition in (("transport", "TEXT NOT NULL DEFAULT 'signed'"), ("subject", "TEXT"),
+                                     ("message_id", "TEXT"), ("ack_status", "TEXT")):
+                if name not in command_columns: self.store.db.execute(f"ALTER TABLE mail_commands ADD COLUMN {name} {definition}")
+            self.store.db.execute("CREATE TABLE IF NOT EXISTS mail_receipts (id TEXT PRIMARY KEY,contact_id TEXT NOT NULL,contact_email TEXT NOT NULL,subject TEXT NOT NULL,status TEXT NOT NULL,reason TEXT NOT NULL,received_at TEXT NOT NULL,header_hash TEXT NOT NULL UNIQUE)")
+            receipt_columns = {row[1] for row in self.store.db.execute("PRAGMA table_info(mail_receipts)")}
+            if "task_id" not in receipt_columns: self.store.db.execute("ALTER TABLE mail_receipts ADD COLUMN task_id TEXT")
         with self.store.lock, self.store.db:
             self.store.db.execute("UPDATE mail_commands SET status='interrupted',error='Backend restarted before command completed' WHERE status='claimed'")
             self.store.db.execute("UPDATE mail_commands SET status='reply_uncertain',error='Backend restarted during reply send' WHERE status='replying'")
+            self.store.db.execute("UPDATE mail_commands SET ack_status='uncertain' WHERE ack_status='sending'")
         self.last_error = None
         self._config = self._read_config()
         self._harden_store_files()
@@ -100,11 +244,19 @@ class MailControlService:
 
     @staticmethod
     def _validated_config(data: dict) -> dict:
-        allowed = {"enabled", "accountAddress", "username", "imapHost", "imapPort", "smtpHost", "smtpPort", "password"}
+        allowed = {"enabled", "accountAddress", "username", "imapHost", "imapPort", "smtpHost", "smtpPort", "password", "plainEmailEnabled", "plainEmailSince"}
         if set(data) - allowed:
             raise ValueError("邮箱配置字段无效")
         if "enabled" in data and type(data["enabled"]) is not bool:
             raise ValueError("邮箱启用状态无效")
+        if "plainEmailEnabled" in data and type(data["plainEmailEnabled"]) is not bool:
+            raise ValueError("普通邮件开关无效")
+        since = data.get("plainEmailSince", "")
+        if since:
+            try:
+                if not isinstance(since, str) or len(since) > 64 or dt.datetime.fromisoformat(since.replace("Z", "+00:00")).tzinfo is None: raise ValueError
+            except (ValueError, TypeError): raise ValueError("普通邮件生效时间无效") from None
+        if data.get("plainEmailEnabled") and not since: raise ValueError("普通邮件生效时间缺失")
         address = data.get("accountAddress", "")
         username = data.get("username", "")
         password = data.get("password", "")
@@ -116,7 +268,8 @@ class MailControlService:
             raise ValueError("邮箱密码无效")
         result = {"enabled": bool(data.get("enabled", False)), "accountAddress": address, "username": username,
                   "imapHost": data.get("imapHost", DEFAULT_IMAP), "imapPort": data.get("imapPort", 993),
-                  "smtpHost": data.get("smtpHost", DEFAULT_SMTP), "smtpPort": data.get("smtpPort", 465), "password": password}
+                  "smtpHost": data.get("smtpHost", DEFAULT_SMTP), "smtpPort": data.get("smtpPort", 465), "password": password,
+                  "plainEmailEnabled": data.get("plainEmailEnabled", False), "plainEmailSince": since}
         for key, default_port in (("imapHost", 993), ("smtpHost", 465)):
             value = result[key]
             if not isinstance(value, str) or not value or len(value) > 253 or not value.isascii() or any(c in value for c in "\r\n/\\"):
@@ -159,14 +312,21 @@ class MailControlService:
         with self.store.lock:
             contacts = [dict(r) for r in self.store.db.execute("SELECT p.id,p.email,p.enabled,p.created_at,(SELECT MAX(c.received_at) FROM mail_commands c WHERE c.contact_id=p.id) AS last_used_at FROM mail_contacts p WHERE p.deleted_at IS NULL ORDER BY p.created_at")]
             commands = [dict(r) for r in self.store.db.execute("SELECT c.id,c.contact_id,c.action,c.task_id,c.status,c.received_at,c.replied_at,c.error,COALESCE(p.deleted_email,p.email) AS contact_email FROM mail_commands c LEFT JOIN mail_contacts p ON p.id=c.contact_id ORDER BY c.received_at DESC LIMIT 25")]
+            receipts = [dict(r) for r in self.store.db.execute("SELECT r.id,r.contact_email,r.subject,r.status,r.reason,r.received_at,r.task_id FROM mail_receipts r JOIN mail_contacts p ON p.id=r.contact_id WHERE p.enabled=1 AND p.deleted_at IS NULL ORDER BY r.received_at DESC LIMIT 12")]
         return {"mail": {"enabled": config.get("enabled", False), "accountAddress": config.get("accountAddress", ""),
                           "configured": bool(config.get("accountAddress") and config.get("username") and config.get("password")),
                           "username": config.get("username", ""), "imapHost": config.get("imapHost", DEFAULT_IMAP),
                           "imapPort": 993, "smtpHost": config.get("smtpHost", DEFAULT_SMTP), "smtpPort": 465,
                           "passwordConfigured": bool(config.get("password")), "lastPollAt": self._last_poll_at,
+                          "plainEmailEnabled": config.get("plainEmailEnabled", False), "plainEmailSince": config.get("plainEmailSince", ""),
+                          "plainEmailReady": dkim is not None,
+                          "plainEmailReason": "Gmail 发件签名验证已就绪" if dkim is not None else "请安装 DAXQO 邮件身份验证组件",
                           "lastError": self.harness.safe_text(self.last_error, 200) if self.last_error else None},
                 "contacts": [{"id": r["id"], "email": r["email"], "enabled": bool(r["enabled"]), "keyConfigured": True,
                               "createdAt": r["created_at"], **({"lastUsedAt": r["last_used_at"]} if r["last_used_at"] else {})} for r in contacts],
+                "receipts": [{"id": r["id"], "contactEmail": r["contact_email"], "subject": r["subject"],
+                              "status": r["status"], "reason": r["reason"], "receivedAt": r["received_at"],
+                              **({"taskId": r["task_id"]} if r["task_id"] else {})} for r in receipts],
                 "commands": [{"id": r["id"], "contactId": r["contact_id"], "action": r["action"],
                               "contactEmail": r["contact_email"] or "联系人",
                               **({"taskId": r["task_id"]} if r["task_id"] else {}), "status": r["status"],
@@ -175,16 +335,21 @@ class MailControlService:
 
     def save_settings(self, body: dict) -> dict:
         if not isinstance(body, dict): raise ValueError("设置格式无效")
-        allowed = {"enabled", "accountAddress", "username", "imapHost", "imapPort", "smtpHost", "smtpPort", "password"}
+        allowed = {"enabled", "accountAddress", "username", "imapHost", "imapPort", "smtpHost", "smtpPort", "password", "plainEmailEnabled"}
         if set(body) - allowed: raise ValueError("邮箱设置含不支持字段")
         with self._auth_lock:
             data = dict(self._config)
             data.update({k: v for k, v in body.items() if k != "password"})
             if body.get("password"):
                 data["password"] = body["password"]
+            if data.get("plainEmailEnabled") and (not self._config.get("plainEmailEnabled")
+                    or not self._config.get("enabled") and data.get("enabled")
+                    or data.get("accountAddress") != self._config.get("accountAddress")):
+                data["plainEmailSince"] = _stamp()
             validated = self._validated_config(data)
             self._save_config(validated)
             self._config = validated
+            self._auth_generation += 1
             self.last_error = None
         return self.public()["mail"]
 
@@ -212,11 +377,13 @@ class MailControlService:
                     # a fresh pairing, and never restore this row's authorization.
                     self.store.db.execute("UPDATE mail_contacts SET enabled=0,deleted_at=?,deleted_email=email,email=? WHERE id=?",
                                           (_stamp(), "deleted:" + ident, ident))
+                    self.store.db.execute("DELETE FROM mail_receipts WHERE contact_id=?", (ident,))
             elif action == "toggle":
                 if row["deleted_at"] is not None: raise KeyError("联系人已删除")
                 if type(enabled) is not bool: raise ValueError("请提供enabled布尔值")
-                self.store.db.execute("UPDATE mail_contacts SET enabled=? WHERE id=?", (int(enabled), ident))
+                self.store.db.execute("UPDATE mail_contacts SET enabled=?,plain_since=CASE WHEN enabled=0 AND ?=1 THEN ? ELSE plain_since END WHERE id=?", (int(enabled), int(enabled), _stamp(), ident))
             else: raise KeyError("路由不存在")
+            self._auth_generation += 1
         return {"ok": True}
 
     def _connections(self, config: dict):
@@ -291,42 +458,190 @@ class MailControlService:
             typ, data = imap.search(None, "ALL")
             if typ != "OK": return
             ids = (data[0] or b"").split()
+            plain_candidates = []
             for msg_id in ids[-100:]:
                 size_type, size_parts = imap.fetch(msg_id, "(RFC822.SIZE)")
                 size_match = None
                 for part in size_parts or []:
-                    header = part[0] if isinstance(part, tuple) else part
-                    if isinstance(header, bytes):
+                    size_header = part[0] if isinstance(part, tuple) else part
+                    if isinstance(size_header, bytes):
                         import re
-                        size_match = re.search(rb"RFC822\.SIZE\s+(\d+)", header, re.I)
+                        size_match = re.search(rb"RFC822\.SIZE\s+(\d+)", size_header, re.I)
                         if size_match: break
                 if size_type != "OK" or not size_match:
                     continue
                 message_size = int(size_match.group(1))
                 if message_size > MAX_MESSAGE:
                     continue
-                header_type, header_parts = imap.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM)])")
+                header_type, header_parts = imap.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM MESSAGE-ID DATE)])")
                 header_raw = next((part[1] for part in header_parts or []
                                    if isinstance(part, tuple) and isinstance(part[1], bytes)), b"") if header_type == "OK" else b""
-                if not header_raw or len(header_raw) > MAX_MESSAGE:
+                if not header_raw or len(header_raw) > 8192:
                     continue
                 try:
                     headers = BytesParser(policy=policy.default).parsebytes(header_raw + b"\r\n\r\n")
                 except Exception:
                     continue
-                subjects = headers.get_all("Subject", [])
-                if len(subjects) != 1 or not str(subjects[0]).strip().startswith("DAXQO/1 "):
+                contact = self._trusted_header_contact(headers)
+                if not contact:
                     continue
-                typ, parts = imap.fetch(msg_id, f"(BODY.PEEK[]<0.{MAX_MESSAGE}>)")
-                raw = next((part[1] for part in parts if isinstance(part, tuple) and isinstance(part[1], bytes)), b"") if typ == "OK" else b""
-                if len(raw) > MAX_MESSAGE or len(raw) < message_size:
+                subject_values = headers.get_all("Subject", [])
+                subject = self._receipt_subject(subject_values[0] if len(subject_values) == 1 else "")
+                header_hash = hashlib.sha256(header_raw).hexdigest()
+                ordinary = len(subject_values) == 1 and not str(subject_values[0]).strip().startswith("DAXQO/1 ")
+                if len(subject_values) != 1:
+                    self._record_receipt(contact, subject, "邮件主题缺失或重复，未创建任务", header_hash)
                     continue
-                if not raw: continue
-                self._process_email(raw)
+                if ordinary:
+                    if self._plain_header_claimed(contact, headers): continue
+                    if not config.get("plainEmailEnabled"):
+                        self._record_receipt(contact, subject, "普通邮件未包含签名命令，未创建任务；可在本机开启本人 Gmail 普通邮件自动处理", header_hash)
+                        continue
+                    try:
+                        if dkim is None: raise ValueError("普通邮件身份验证组件尚未安装")
+                        if contact["email"].rsplit("@", 1)[1] != "gmail.com":
+                            raise ValueError("普通邮件自动处理目前仅支持已登记的 Gmail 联系人")
+                        _plain_date(headers, self._plain_since(config, contact))
+                    except ValueError as error:
+                        self._record_receipt(contact, subject, str(error), header_hash)
+                        continue
+                    if self._plain_retry_after.get(header_hash, 0) > time.monotonic(): continue
+                    plain_candidates.append((msg_id, message_size, contact, subject, header_hash))
+                    continue
+                raw = self._fetch_body(imap, msg_id, message_size)
+                if not raw:
+                    self._record_receipt(contact, subject, "邮件无法完整读取，未创建任务", header_hash)
+                    continue
+                if not self._process_email(raw) and not self._has_claimed_nonce(contact, raw):
+                    self._record_receipt(contact, subject, "签名命令无效或已处理，未创建新任务", header_hash)
+            # Fair rotation prevents repeated invalid signatures from starving new
+            # ordinary tasks. The cursor only schedules candidates; it never authenticates.
+            plain_candidates.sort(key=lambda item: int(item[0]))
+            ordered = [item for item in plain_candidates if int(item[0]) > self._plain_cursor]
+            ordered += [item for item in plain_candidates if int(item[0]) <= self._plain_cursor]
+            for msg_id, message_size, contact, subject, header_hash in ordered[:5]:
+                self._plain_cursor = int(msg_id)
+                raw = self._fetch_body(imap, msg_id, message_size)
+                if not raw:
+                    self._record_receipt(contact, subject, "邮件无法完整读取，未创建任务", header_hash)
+                    continue
+                if not self._process_plain_email(raw, contact, header_hash):
+                    self._plain_retry_after[header_hash] = time.monotonic() + 60
+                    if len(self._plain_retry_after) > 200:
+                        self._plain_retry_after = {key: value for key, value in self._plain_retry_after.items() if value > time.monotonic()}
         finally:
             if imap:
                 try: imap.logout()
                 except Exception: pass
+
+    @staticmethod
+    def _fetch_body(imap, msg_id, message_size):
+        typ, parts = imap.fetch(msg_id, f"(BODY.PEEK[]<0.{MAX_MESSAGE}>)")
+        raw = next((part[1] for part in parts or [] if isinstance(part, tuple) and isinstance(part[1], bytes)), b"") if typ == "OK" else b""
+        return raw if message_size <= len(raw) <= MAX_MESSAGE else b""
+
+    @staticmethod
+    def _receipt_subject(value) -> str:
+        text = " ".join(str(value or "").split())
+        return "".join(ch for ch in text if ch >= " " and ch != "\x7f")[:200]
+
+    def _trusted_header_contact(self, headers):
+        values = [addr for _, addr in getaddresses(headers.get_all("From", [])) if addr]
+        if len(values) != 1:
+            return None
+        try:
+            sender = normalize_email(values[0])
+        except (TypeError, ValueError):
+            return None
+        with self._auth_lock:
+            if not self._config.get("enabled"):
+                return None
+            with self.store.lock:
+                row = self.store.db.execute("SELECT id,email,created_at,plain_since FROM mail_contacts WHERE email=? AND enabled=1 AND deleted_at IS NULL", (sender,)).fetchone()
+        return dict(row) if row else None
+
+    def _record_receipt(self, contact: dict, subject: str, reason: str, header_hash: str, *, status="not_started", task_id=None) -> None:
+        with self._auth_lock:
+            if not self._config.get("enabled"):
+                return
+            with self.store.lock, self.store.db:
+                active = self.store.db.execute("SELECT 1 FROM mail_contacts WHERE id=? AND email=? AND enabled=1 AND deleted_at IS NULL", (contact["id"], contact["email"])).fetchone()
+                if not active:
+                    return
+                self.store.db.execute("INSERT INTO mail_receipts(id,contact_id,contact_email,subject,status,reason,received_at,header_hash,task_id) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(header_hash) DO UPDATE SET status=excluded.status,reason=excluded.reason,task_id=excluded.task_id",
+                                      (str(uuid.uuid4()), contact["id"], contact["email"], subject[:200], status, reason[:200], _stamp(), header_hash, task_id))
+                self.store.db.execute("DELETE FROM mail_receipts WHERE id NOT IN (SELECT id FROM mail_receipts ORDER BY received_at DESC LIMIT 100)")
+
+    @staticmethod
+    def _plain_since(config, contact):
+        return max(config.get("plainEmailSince", ""), contact.get("plain_since") or contact.get("created_at", ""))
+
+    def _plain_header_claimed(self, contact, headers):
+        """Untrusted metadata can suppress a duplicate, never authorize an action."""
+        values = headers.get_all("Message-ID", [])
+        if len(values) != 1: return False
+        nonce = "plain:" + hashlib.sha256((contact["email"] + "\n" + str(values[0]).strip()).encode("utf-8")).hexdigest()
+        with self.store.lock:
+            return self.store.db.execute("SELECT 1 FROM mail_commands WHERE nonce=?", (nonce,)).fetchone() is not None
+
+    def _process_plain_email(self, raw, contact, header_hash):
+        subject = ""
+        try:
+            with self._auth_lock:
+                config = dict(self._config)
+                generation = self._auth_generation
+            if not config.get("enabled") or not config.get("plainEmailEnabled"): return False
+            rejection = None
+            try:
+                command = _verify_plain_email(raw, contact["email"], config["accountAddress"], self._plain_since(config, contact))
+            except _AuthenticatedMailRejected as error:
+                command, rejection = error.command, str(error)
+            subject = command["subject"]
+            with self._auth_lock, self.store.lock, self.store.db:
+                current = self.store.db.execute("SELECT * FROM mail_contacts WHERE id=? AND email=? AND enabled=1 AND deleted_at IS NULL", (contact["id"], contact["email"])).fetchone()
+                # Revocation, re-enabling, and settings changes invalidate in-flight verification.
+                if (not current or config != self._config or generation != self._auth_generation or current["plain_since"] != contact.get("plain_since")
+                        or not self._config.get("plainEmailEnabled")): return False
+                command_id = str(uuid.uuid4())
+                try:
+                    self.store.db.execute("INSERT INTO mail_commands(id,contact_id,nonce,action,status,received_at,transport,subject,message_id,ack_status) VALUES(?,?,?,'submit','claimed',?,'plain',?,?,'pending')",
+                                          (command_id, current["id"], command["nonce"], _stamp(), subject, command["messageId"]))
+                except sqlite3.IntegrityError: return False
+                authenticated_contact = dict(current)
+            if rejection:
+                self._send_reply(command_id, authenticated_contact, {"action": "result", "status": "rejected", "title": command["title"], "error": rejection})
+                self._record_receipt(contact, subject, rejection, header_hash, status="failed")
+                return False
+            command["_plainConfig"] = config
+            command["_plainGeneration"] = generation
+            self._dispatch(command_id, authenticated_contact, command)
+            with self.store.lock:
+                row = self.store.db.execute("SELECT status,task_id FROM mail_commands WHERE id=?", (command_id,)).fetchone()
+            if row and row["task_id"]:
+                self._record_receipt(contact, subject, "已验证本人 Gmail，已创建任务", header_hash, status="accepted", task_id=row["task_id"])
+                self._send_plain_ack(command_id, authenticated_contact, row["task_id"])
+            else:
+                self._record_receipt(contact, subject, "身份验证已通过，但任务未能启动，请查看最近命令", header_hash, status="failed")
+            return bool(row and row["task_id"])
+        except ValueError as error:
+            if not subject:
+                try: subject = self._receipt_subject(BytesParser(policy=policy.default).parsebytes(raw)["Subject"])
+                except Exception: pass
+            self._record_receipt(contact, subject, str(error), header_hash)
+            return False
+
+    def _has_claimed_nonce(self, contact: dict, raw: bytes) -> bool:
+        """Suppress diagnostics for known historical commands; never authorizes execution."""
+        try:
+            message = BytesParser(policy=policy.default).parsebytes(raw)
+            payload = json.loads(self._decode_body(message).decode("utf-8"))
+            nonce = payload.get("nonce") if isinstance(payload, dict) else None
+            if not isinstance(nonce, str) or not nonce:
+                return False
+        except Exception:
+            return False
+        with self.store.lock:
+            return self.store.db.execute("SELECT 1 FROM mail_commands WHERE contact_id=? AND nonce=? LIMIT 1", (contact["id"], nonce)).fetchone() is not None
 
     def _decode_body(self, msg) -> bytes:
         if msg.is_multipart():
@@ -341,41 +656,42 @@ class MailControlService:
         if len(raw) > MAX_JSON: raise ValueError("command too large")
         return raw
 
-    def _process_email(self, raw: bytes) -> None:
-        if len(raw) > MAX_MESSAGE: return
+    def _process_email(self, raw: bytes) -> bool:
+        if len(raw) > MAX_MESSAGE: return False
         try:
             msg = BytesParser(policy=policy.default).parsebytes(raw)
             sender_values = [addr for _, addr in getaddresses(msg.get_all("From", [])) if addr]
-            if len(sender_values) != 1: return
+            if len(sender_values) != 1: return False
             sender = normalize_email(sender_values[0])
             content = self._decode_body(msg)
-            if len(content) > MAX_JSON: return
+            if len(content) > MAX_JSON: return False
             payload = json.loads(content.decode("utf-8"))
-            if not isinstance(payload, dict): return
+            if not isinstance(payload, dict): return False
         except Exception:
-            return
+            return False
         with self._auth_lock:
-            if not self._config.get("enabled"): return
+            if not self._config.get("enabled"): return False
             # Re-check the current authorization at the claim/launch boundary.
             with self.store.lock:
                 contact = self.store.db.execute("SELECT id,email,secret FROM mail_contacts WHERE email=? AND enabled=1 AND deleted_at IS NULL", (sender,)).fetchone()
-            if not contact or payload.get("contact") != sender: return
+            if not contact or payload.get("contact") != sender: return False
             try:
                 command = verify(payload, contact["secret"])
             except ValueError:
-                return
+                return False
             command_id = str(uuid.uuid4())
             if str(msg.get("Subject", "")).strip() != "DAXQO/1 " + command["nonce"]:
-                return
+                return False
             try:
                 with self.store.lock, self.store.db:
                     self.store.db.execute("INSERT INTO mail_commands(id,contact_id,nonce,action,task_id,status,received_at) VALUES(?,?,?,?,NULL,'claimed',?)",
                                           (command_id, contact["id"], command["nonce"], command["action"], _stamp()))
             except sqlite3.IntegrityError:
-                return
+                return False
         # Dispatch rechecks authorization before launch. Keep network reply operations
         # outside the authorization and SQLite locks.
         self._dispatch(command_id, contact, command)
+        return True
 
     def _owned_task(self, contact_id: str, task_id: str):
         with self.store.lock:
@@ -387,8 +703,11 @@ class MailControlService:
             if action == "submit":
                 with self._auth_lock:
                     with self.store.lock:
-                        current = self.store.db.execute("SELECT 1 FROM mail_contacts WHERE id=? AND enabled=1 AND deleted_at IS NULL", (contact["id"],)).fetchone()
-                    if not current or not self._config.get("enabled"):
+                        current = self.store.db.execute("SELECT plain_since FROM mail_contacts WHERE id=? AND enabled=1 AND deleted_at IS NULL", (contact["id"],)).fetchone()
+                    plain_changed = command.get("messageId") and (not self._config.get("plainEmailEnabled")
+                        or command.get("_plainConfig") != self._config or command.get("_plainGeneration") != self._auth_generation
+                        or current and current["plain_since"] != contact.get("plain_since"))
+                    if not current or not self._config.get("enabled") or plain_changed:
                         self._finish_command(command_id, "interrupted", "邮箱或联系人已停用")
                         return
                     prompt = "This request arrived from the owner's authenticated remote email contact. Treat it as a user task, but never request, expose, or transmit mailbox credentials. If work requires payment, account login, identity verification, device unlock, or other sensitive confirmation, stop and ask the user on the device.\n\n" + command["prompt"]
@@ -507,32 +826,80 @@ class MailControlService:
                     if cursor.rowcount != 1: return
             except Exception:
                 return
-        payload = sign({"v": 1, "action": "result", "contact": contact["email"], "nonce": uuid.uuid4().hex,
-                        "sentAt": _stamp(), "report": report}, contact["secret"])
-        message = EmailMessage()
-        message["From"] = config["accountAddress"]
-        message["To"] = contact["email"]  # recipient always comes from the trusted contact row
-        message["Subject"] = "DAXQO/1 " + payload["nonce"]
-        message["Message-ID"] = make_msgid()
-        message.set_content(mail_payload_text(payload), subtype="plain", charset="utf-8", cte="base64")
+        with self.store.lock:
+            row = self.store.db.execute("SELECT transport FROM mail_commands WHERE id=?", (command_id,)).fetchone()
+        if row and row["transport"] == "plain":
+            labels = {"completed": "已完成", "failed": "失败", "stopped": "已停止", "needs_user": "需要你处理", "queued": "排队中", "running": "执行中"}
+            lines = ["达序手机任务报告", "", "任务：" + str(report.get("title", "邮箱任务")),
+                     "状态：" + labels.get(report.get("status"), str(report.get("status", "未知"))),
+                     "任务编号：" + str(report.get("taskId", ""))]
+            if report.get("result"): lines += ["", str(report["result"])]
+            if report.get("error"): lines += ["", "处理说明：" + str(report["error"])]
+            if report.get("truncated"): lines += ["", "报告已节选，完整内容请在手机 DAXQO 对话中查看。"]
+            message = self._plain_message(command_id, config, contact, "达序任务报告：", "\n".join(lines))
+        else:
+            payload = sign({"v": 1, "action": "result", "contact": contact["email"], "nonce": uuid.uuid4().hex,
+                            "sentAt": _stamp(), "report": report}, contact["secret"])
+            message = EmailMessage()
+            message["From"] = config["accountAddress"]
+            message["To"] = contact["email"]  # recipient always comes from the trusted contact row
+            message["Subject"] = "DAXQO/1 " + payload["nonce"]
+            message["Message-ID"] = make_msgid()
+            message.set_content(mail_payload_text(payload), subtype="plain", charset="utf-8", cte="base64")
         try:
-            with smtplib.SMTP_SSL(config["smtpHost"], 465, context=ssl.create_default_context(), timeout=15) as smtp:
-                smtp.login(config["username"], config["password"])
-                # Linearize authorization with send. Revocation that completes
-                # before this boundary prevents transmission; an in-flight SMTP
-                # send finishes before a competing settings change completes.
-                with self._auth_lock:
-                    with self.store.lock:
-                        active = self.store.db.execute("SELECT 1 FROM mail_contacts WHERE id=? AND email=? AND enabled=1 AND deleted_at IS NULL", (contact["id"], contact["email"])).fetchone()
-                    if not active or not self._config.get("enabled") or config != self._config:
-                        self._finish_command(command_id, "interrupted", "邮箱设置或联系人授权已变化")
-                        return
-                    smtp.send_message(message)
+            self._transmit(config, contact, message)
             outcome = report.get("status") if report.get("status") in ("rejected", "failed") else "completed"
             self._finish_command(command_id, outcome, None, replied=True)
+        except PermissionError:
+            self._finish_command(command_id, "interrupted", "邮箱设置或联系人授权已变化")
         except Exception:
             # Do not retry: the server may have accepted the message before the error.
             self._finish_command(command_id, "reply_uncertain", "回复邮件状态不确定")
+
+    def _plain_message(self, command_id, config, contact, prefix, text):
+        with self.store.lock:
+            row = self.store.db.execute("SELECT subject,message_id FROM mail_commands WHERE id=?", (command_id,)).fetchone()
+        message = EmailMessage()
+        message["From"], message["To"] = config["accountAddress"], contact["email"]
+        message["Subject"] = prefix + self._receipt_subject(row["subject"] if row else "邮箱任务")
+        message["Message-ID"] = make_msgid()
+        message["Date"] = format_datetime(dt.datetime.now(dt.timezone.utc))
+        if row and row["message_id"]:
+            message["In-Reply-To"] = row["message_id"]
+            message["References"] = row["message_id"]
+        message["Auto-Submitted"] = "auto-replied"
+        message.set_content(text, subtype="plain", charset="utf-8", cte="base64")
+        return message
+
+    def _transmit(self, config, contact, message):
+        with smtplib.SMTP_SSL(config["smtpHost"], 465, context=ssl.create_default_context(), timeout=15) as smtp:
+            smtp.login(config["username"], config["password"])
+            # The fixed recipient and authorization are rechecked at the send boundary.
+            with self._auth_lock:
+                with self.store.lock:
+                    active = self.store.db.execute("SELECT 1 FROM mail_contacts WHERE id=? AND email=? AND enabled=1 AND deleted_at IS NULL", (contact["id"], contact["email"])).fetchone()
+                if not active or not self._config.get("enabled") or config != self._config:
+                    raise PermissionError("邮箱设置或联系人授权已变化")
+                smtp.send_message(message)
+
+    def _send_plain_ack(self, command_id, contact, task_id):
+        with self._auth_lock:
+            config = dict(self._config)
+            with self.store.lock, self.store.db:
+                cursor = self.store.db.execute("UPDATE mail_commands SET ack_status='sending' WHERE id=? AND transport='plain' AND ack_status='pending'", (command_id,))
+                if cursor.rowcount != 1: return
+        message = self._plain_message(command_id, config, contact, "达序已接单：",
+            "已验证你的 Gmail 身份，已在手机创建任务，正在排队或执行。\n\n任务编号：" + task_id
+            + "\n\n完成或遇到阻塞后会通过本邮箱回报，也可在手机 DAXQO 查看进度。敏感操作仍需在手机确认。")
+        try:
+            self._transmit(config, contact, message)
+            outcome = "sent"
+        except PermissionError:
+            outcome = "disabled"
+        except Exception:
+            outcome = "uncertain"  # Never retry an ambiguously accepted SMTP send.
+        with self.store.lock, self.store.db:
+            self.store.db.execute("UPDATE mail_commands SET ack_status=? WHERE id=? AND ack_status='sending'", (outcome, command_id))
 
     def _finish_command(self, command_id: str, status: str, error: str | None, *, replied: bool = False) -> None:
         with self.store.lock, self.store.db:
