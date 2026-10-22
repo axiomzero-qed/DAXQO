@@ -157,10 +157,12 @@ public final class DeviceAccessibilityService extends AccessibilityService {
             boolean launch = power == null || !power.isInteractive() || lock.locked;
             if (launch) {
                 WakeActivity.beginRequest(id, deadline);
+                WakeActivity.trace(this, "service_launch");
                 try {
                     startActivity(new Intent(this, WakeActivity.class).putExtra(WakeActivity.EXTRA_REQUEST_ID, id)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_HISTORY));
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
                 } catch (Exception ignored) {
+                    WakeActivity.trace(this, "service_launch_failed");
                     WakeActivity.finishActive();
                     callback.done(failure(id, "wake_unavailable", "系统未允许打开唤醒界面，请在手机上检查后重试"));
                     return;
@@ -214,11 +216,13 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         // The callback is not proof of dismissal. Require the real keyguard to
         // be gone, the display awake, and the temporary activity fully closed.
         if (lock.known && !lock.locked && screenOn && (!launchRequested || WakeActivity.hasStarted(id)) && !WakeActivity.isActive()) {
+            WakeActivity.trace(this, "service_ready");
             WakeActivity.finishActive();
             callback.done(success(id, DeviceState.status(this)));
             return;
         }
         if (android.os.SystemClock.elapsedRealtime() >= deadline) {
+            WakeActivity.trace(this, "service_deadline");
             WakeActivity.finishActive();
             if (!lock.known) callback.done(failure(id, "locked", "无法确认锁屏安全状态，请亲自亮屏解锁"));
             else if (lock.locked) callback.done(failure(id, "locked", lock.secureLock || lock.deviceSecure

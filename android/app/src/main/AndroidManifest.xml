@@ -36,7 +36,8 @@
         </activity>
         <activity android:name=".ControlActivity" android:exported="false" />
         <activity android:name=".WakeActivity" android:exported="false"
-            android:excludeFromRecents="true" android:noHistory="true"
+            android:excludeFromRecents="true"
+            android:showWhenLocked="true" android:turnScreenOn="true"
             android:theme="@style/AppTheme" />
         <service android:name=".DeviceAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
