@@ -78,6 +78,20 @@ class AndroidMCPTests(unittest.TestCase):
         self.bridge = mcp.AndroidBridge(self.state, self.http.server_port, timeout=1)
         self.server = mcp.AndroidMCP(self.bridge)
 
+    def test_default_timeout_allows_native_execution_window(self):
+        self.assertGreaterEqual(mcp.HTTP_TIMEOUT, 10)
+        bridge = mcp.AndroidBridge(self.state, self.http.server_port)
+        with patch.object(bridge.opener, "open", wraps=bridge.opener.open) as opened:
+            bridge.status()
+        self.assertEqual(opened.call_args.kwargs["timeout"], 15.0)
+
+    def test_timed_out_write_is_not_automatically_replayed(self):
+        with patch.object(self.bridge.opener, "open", side_effect=TimeoutError) as opened:
+            with self.assertRaises(mcp.BridgeError) as raised:
+                self.bridge.execute("tap", {"x": 10, "y": 20})
+        self.assertEqual(raised.exception.code, "timeout")
+        self.assertEqual(opened.call_count, 1)
+
     def tearDown(self):
         self.http.shutdown(); self.http.server_close(); self.thread.join(timeout=1)
         self.temp.cleanup()
@@ -195,6 +209,9 @@ class AndroidMCPTests(unittest.TestCase):
         allowed = set(actions["inputSchema"]["properties"]["action"]["enum"])
         self.assertEqual(allowed, {"wake", "open_app", "tap", "swipe", "long_press", "input", "back", "home"})
         self.assertTrue(allowed.isdisjoint({"resume", "unlock", "grant_permission", "approve_payment"}))
+        description = actions["description"]
+        for required in ("open_app requires args.packageName", "tap requires args.x and args.y", "input requires args.text"):
+            self.assertIn(required, description)
 
     def test_capability_symlink_is_rejected(self):
         linked_state = Path(self.temp.name) / "linked-state"

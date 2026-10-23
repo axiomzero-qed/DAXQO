@@ -17,6 +17,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import server
+import android_mcp_server as android_mcp
 
 
 # This is deliberately a test-only JSON-RPC child process, not a simulated Codex install.
@@ -911,11 +912,47 @@ for line in sys.stdin:
         self.assertIn("args = " + json.dumps([str(Path(server.__file__).resolve().parent / "android_mcp_server.py"),
             "--state-dir", str(self.harness.state), "--port", "18883"]), block)
         self.assertIn('enabled_tools = ["android_status", "android_observe", "android_action"]', block)
+        self.assertGreaterEqual(int(next(line.split("=", 1)[1] for line in block.splitlines()
+            if line.startswith("tool_timeout_sec"))), 2 * android_mcp.HTTP_TIMEOUT)
         self.assertIn('default_tools_approval_mode = "prompt"', block)
         for tool in ("android_status", "android_observe", "android_action"):
             self.assertIn("[mcp_servers.daxqo_android.tools." + tool + ']\napproval_mode = "approve"', config)
         self.assertEqual(config.count('approval_mode = "approve"'), 3)
         self.assertNotIn(self.harness.capability, config)
+
+    def test_android_mcp_progress_exposes_bounded_error_without_tool_arguments(self):
+        self.insert_running_task("android-progress")
+        sensitive = "secret-image-bytes capability=fixture-secret"
+        error = {"ok": False, "error": {"code": "timeout", "message": "读取界面超时"}}
+        item = {"type": "mcpToolCall", "server": "daxqo_android", "tool": "android_observe",
+            "status": "failed", "arguments": {"text": "never expose", "apiKey": sensitive},
+            "result": {"content": [{"type": "text", "text": json.dumps(error)},
+                {"type": "image", "mimeType": "image/png", "data": sensitive}]}}
+        self.harness._engine_event({"method": "item/completed", "params": {
+            "threadId": "thread-terminal", "turnId": "turn-terminal", "item": item}})
+        event = self.harness.store.progress_rows("android-progress")[-1]
+        self.assertEqual(event["summary"], "读取手机界面")
+        self.assertEqual(event["errorCode"], "timeout")
+        self.assertIn("读取界面超时", event["error"])
+        public = json.dumps(event)
+        for private in ("never expose", "fixture-secret", "secret-image-bytes", "image/png"):
+            self.assertNotIn(private, public)
+
+    def test_non_android_mcp_progress_does_not_expose_android_error_details(self):
+        self.insert_running_task("other-mcp-progress")
+        item = {"type": "mcpToolCall", "server": "other_server", "tool": "lookup", "status": "failed",
+            "arguments": {"apiKey": "fixture-secret"},
+            "result": {"content": [{"type": "text", "text": json.dumps({"ok": False,
+                "error": {"code": "timeout", "message": "private Android detail"}})}]}}
+        self.harness._engine_event({"method": "item/completed", "params": {
+            "threadId": "thread-terminal", "turnId": "turn-terminal", "item": item}})
+        event = self.harness.store.progress_rows("other-mcp-progress")[-1]
+        self.assertEqual(event["summary"], "外部工具")
+        self.assertNotIn("errorCode", event)
+        self.assertNotIn("error", event)
+        public = json.dumps(event)
+        self.assertNotIn("fixture-secret", public)
+        self.assertNotIn("private Android detail", public)
 
     def test_initial_attachment_message_separates_display_text_from_native_path(self):
         body = {"prompt": ""}

@@ -867,7 +867,7 @@ class Harness:
                    f"model_auto_compact_token_limit = {int(compact)}\n"
                    f"model_context_window = {int(context_window)}\n"
                    "tool_output_token_limit = 2000\n"
-                   f"developer_instructions = \"For long tasks, give brief public progress after major steps and when blocked. Delegate independent checks to at most {agent_threads} subagents when useful; do not recursively delegate. Handle simple tasks directly. For Android tasks use daxqo_android in an observe-action-observe loop, with screenshots for visual checks. Follow the owner's native policy: full mode attempts requested operations directly; confirm mode returns approval_required for sensitive writes. On approval_required, report the specific pending action and approval ID, then end the turn waiting for owner consent. The GUI/authenticated email will record consent and automatically resume this task. Do not ask the owner to click the target button or perform your work. Never approve yourself, change control mode, or use shell/adb to bypass consent. If screen-off or non-secure locked, try android_action wake. Secure keyguard and actual OS restrictions must be reported accurately, not attributed to an untested system prohibition. Never reveal hidden reasoning or credentials.\"\n"
+                   f"developer_instructions = \"For long tasks, give brief public progress after major steps and when blocked. Delegate independent checks to at most {agent_threads} subagents when useful; do not recursively delegate. Handle simple tasks directly. For Android tasks use daxqo_android in an observe-action-observe loop, with screenshots for visual checks. Read android_status device/appStores to choose an installed store instead of guessing the manufacturer. For app installation prefer the on-device store; open_app requires args.packageName. Verify the foreground after launch. After a timeout, observe/check status before any further write; stop after two consecutive timeout/unavailable results and report the failed step. Do not replace a failed store flow with web/APK downloads unless the owner requests that fallback. Claim installation only after observing the store installed/open state or launching the requested app. Follow the owner's native policy: full mode attempts requested operations directly; confirm mode returns approval_required for sensitive writes. On approval_required, report the specific pending action and approval ID, then end the turn waiting for owner consent. The GUI/authenticated email will record consent and automatically resume this task. Do not ask the owner to click the target button or perform your work. Never approve yourself, change control mode, or use shell/adb to bypass consent. If screen-off or non-secure locked, try android_action wake. Secure keyguard and actual OS restrictions must be reported accurately, not attributed to an untested system prohibition. Never reveal hidden reasoning or credentials.\"\n"
                    "preferred_auth_method = \"apikey\"\n"
                    "forced_login_method = \"api\"\n"
                    f"{catalog_setting}"
@@ -892,7 +892,8 @@ class Harness:
                    'enabled_tools = ["android_status", "android_observe", "android_action"]\n'
                    'default_tools_approval_mode = "prompt"\n'
                    "startup_timeout_sec = 10\n"
-                   "tool_timeout_sec = 20\n\n"
+                   # observe can issue both a tree and a screenshot request.
+                   "tool_timeout_sec = 40\n\n"
                    "[mcp_servers.daxqo_android.tools.android_status]\n"
                    'approval_mode = "approve"\n\n'
                    "[mcp_servers.daxqo_android.tools.android_observe]\n"
@@ -1324,6 +1325,14 @@ class Harness:
                      "contextCompaction": "上下文整理"}.get(item_type, "工具")
             is_compact = item_type == "contextCompaction"
             payload: dict[str, Any] = {"phase": "compact" if is_compact else "tool", "summary": label, "status": self.safe_text(status, 40)}
+            if item_type == "mcpToolCall" and item.get("server") == "daxqo_android":
+                phone_labels = {"android_status": "检查手机状态", "android_observe": "读取手机界面", "android_action": "操作手机"}
+                if item.get("tool") in phone_labels:
+                    payload["summary"] = phone_labels[item["tool"]]
+                    error = self._android_tool_error(item)
+                    if error:
+                        payload["errorCode"] = self.safe_text(error.get("code", ""), 80)
+                        payload["error"] = self.safe_text(error.get("message", ""), 300)
             if is_compact and isinstance(item.get("id"), str): payload["itemId"] = self.safe_text(item["id"], 100)
             if item_type == "commandExecution":
                 # Keep only the executable label; never expose command arguments or output.

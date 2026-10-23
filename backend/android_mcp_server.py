@@ -20,7 +20,7 @@ from typing import Any, BinaryIO
 DEFAULT_PORT = 18883
 MAX_RESPONSE = 5 * 1024 * 1024
 MAX_LINE = 1024 * 1024
-HTTP_TIMEOUT = 5.0
+HTTP_TIMEOUT = 15.0
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 ACTION_NAMES = ("wake", "open_app", "tap", "swipe", "long_press", "input", "back", "home")
 SENSITIVE_KEY = re.compile(r"(?i)(?:capability|authorization|access[_-]?token|refresh[_-]?token|api[_-]?key|secret|password|credential)")
@@ -198,7 +198,7 @@ TOOL_DEFINITIONS = [
          "includeTree": {"type": "boolean", "default": True},
          "includeScreenshot": {"type": "boolean", "default": False},
          "expectedPackage": {"type": "string", "maxLength": 255}}, "additionalProperties": False}},
-    {"name": "android_action", "description": "Perform one bounded Android action under the owner's phone policy. Full mode executes without an extra DAXQO consent gate. Confirm mode returns approval_required plus an approval ID for sensitive writes; report waiting for owner confirmation and end the turn, without asking the owner to operate the phone. Owner GUI or authenticated email handles consent and automatically resumes this task. Never approve yourself or change policy through other tools. Wake can dismiss a known non-secure swipe lock through Android's official API; verify actual state. Report actual system failures accurately; no secure-keyguard or protected-window bypass.",
+    {"name": "android_action", "description": "Perform one bounded Android action under the owner's phone policy. Arguments: open_app requires args.packageName (Android package name); tap requires args.x and args.y screen coordinates; input requires args.text. Full mode executes without an extra DAXQO consent gate. Confirm mode returns approval_required plus an approval ID for sensitive writes; report waiting for owner confirmation and end the turn, without asking the owner to operate the phone. Owner GUI or authenticated email handles consent and automatically resumes this task. Never approve yourself or change policy through other tools. Wake can dismiss a known non-secure swipe lock through Android's official API; verify actual state. Report actual system failures accurately; no secure-keyguard or protected-window bypass.",
      "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
      "inputSchema": {"type": "object", "properties": {
          "action": {"type": "string", "enum": list(ACTION_NAMES)},
