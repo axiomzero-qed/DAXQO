@@ -6,7 +6,15 @@ android {
     namespace 'io.daxqo.app'
     compileSdk 35
 
-    def xmBuild = project.hasProperty('xm') && property('xm') == 'true'
+    def explicitPlatform = project.hasProperty('platform') ? property('platform').toString().trim().toLowerCase(Locale.ROOT) : null
+    if (explicitPlatform != null && !(explicitPlatform in ['standard', 'xm'])) {
+        throw new GradleException("Invalid -Pplatform value '${explicitPlatform}'; use standard or xm.")
+    }
+    def legacyXm = project.hasProperty('xm') && property('xm').toString().toBoolean()
+    def xmBuild = explicitPlatform != null ? explicitPlatform == 'xm' : legacyXm
+    if (explicitPlatform != null && project.hasProperty('xm') && legacyXm != xmBuild) {
+        throw new GradleException("Conflicting -Pplatform=${explicitPlatform} and -Pxm=${property('xm')} options.")
+    }
 
     defaultConfig {
         applicationId xmBuild ? 'io.daxqo.xm' : 'io.daxqo.app'
@@ -15,6 +23,7 @@ android {
         versionCode 4
         versionName xmBuild ? '0.4.0-xm' : '0.4.0'
         resValue 'string', 'app_name', xmBuild ? 'DAXQO for XM' : '达序 DAXQO'
+        resValue 'string', 'platform_id', xmBuild ? 'xm' : 'standard'
         resValue 'string', 'pairing_scheme', xmBuild ? 'daxqo-xm' : 'daxqo'
         resValue 'string', 'shortcut_target_package', xmBuild ? 'io.daxqo.xm' : 'io.daxqo.app'
         manifestPlaceholders = [pairingScheme: xmBuild ? 'daxqo-xm' : 'daxqo']

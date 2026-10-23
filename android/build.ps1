@@ -1,5 +1,8 @@
-param([switch]$InstallTools, [switch]$Lint, [switch]$Xm)
+param([switch]$InstallTools, [switch]$Lint, [switch]$Xm, [ValidateSet('standard','xm')][string]$Platform)
 $ErrorActionPreference = 'Stop'
+if ($PSBoundParameters.ContainsKey('Platform') -and $Xm -and $Platform -ne 'xm') {
+    throw 'Conflicting -Xm and -Platform values.'
+}
 $androidDir = $PSScriptRoot
 $repoDir = Split-Path -Parent $androidDir
 $toolsDir = Join-Path $repoDir '.tools'
@@ -85,7 +88,9 @@ $localProps = Join-Path $mappedAndroidDir 'local.properties'
 Push-Location $mappedAndroidDir
 try {
     $buildTasks = @()
-    if ($Xm) { $buildTasks += '-Pxm=true' }
+    if ($PSBoundParameters.ContainsKey('Platform')) {
+        $buildTasks += "-Pplatform=$Platform"
+    } elseif ($Xm) { $buildTasks += '-Pxm=true' }
     $buildTasks += 'assembleDebug'
     if ($Lint) { $buildTasks += 'lintDebug' }
     & (Join-Path $mappedTools 'gradle-8.10.2\bin\gradle.bat') --no-daemon @buildTasks

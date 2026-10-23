@@ -7,7 +7,8 @@ import shutil
 ROOT = Path(__file__).resolve().parent.parent
 FLAT = ('server.py', 'supervisor.py', 'runtime_control.py', 'test_server.py',
         'test_supervisor.py', 'test_runtime_control.py', 'task_services.py', 'test_task_services.py',
-        'android_mcp_server.py', 'test_android_mcp.py', 'remote_protocol.py', 'test_remote_protocol.py', 'email_control.py', 'test_email_control.py',
+        'android_mcp_server.py', 'test_android_mcp.py', 'phone_backends.py', 'test_phone_backends.py',
+        'remote_protocol.py', 'test_remote_protocol.py', 'email_control.py', 'test_email_control.py',
         'test_remote_email_mcp.py',
         'models-deepseek.json', 'WORKSPACE_AGENTS.md')
 SCRIPT_FLAT = ('remote_email_mcp.py',)

@@ -6,6 +6,7 @@ import android.content.SharedPreferences;
 import android.os.PowerManager;
 import org.json.JSONObject;
 import org.json.JSONArray;
+import io.daxqo.app.platform.PlatformProfile;
 
 final class DeviceState {
     static final String PREFS = "device_control_private";
@@ -82,13 +83,13 @@ final class DeviceState {
             DeviceAccessibilityService service = DeviceAccessibilityService.current;
             LockState lock = lockState(context);
             result.put("version", "0.4.0");
+            PlatformProfile profile = PlatformProfile.fromId(context.getString(R.string.platform_id));
+            result.put("platformId", profile.id);
             result.put("device", new JSONObject().put("manufacturer", android.os.Build.MANUFACTURER)
                     .put("model", android.os.Build.MODEL).put("androidVersion", android.os.Build.VERSION.RELEASE)
                     .put("sdkInt", android.os.Build.VERSION.SDK_INT));
             JSONArray stores = new JSONArray();
-            for (String name : new String[] {"com.xiaomi.market", "com.bbk.appstore", "com.vivo.appstore",
-                    "com.heytap.market", "com.oppo.market", "com.huawei.appmarket",
-                    "com.sec.android.app.samsungapps", "com.android.vending"}) {
+            for (String name : profile.appStoreCandidates()) {
                 if (context.getPackageManager().getLaunchIntentForPackage(name) != null) stores.put(name);
             }
             result.put("appStores", stores);

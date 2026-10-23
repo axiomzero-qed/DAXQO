@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 import uuid
 from typing import Any, BinaryIO
+from phone_backends import BACKENDS, DEFAULT_BACKEND, BackendUnavailable, PhoneBackend, create_backend
 
 DEFAULT_PORT = 18883
 MAX_RESPONSE = 5 * 1024 * 1024
@@ -280,7 +281,7 @@ def _validate_action_args(action: str, args: Any, expected_package: Any) -> dict
 
 
 class AndroidMCP:
-    def __init__(self, bridge: AndroidBridge):
+    def __init__(self, bridge: PhoneBackend):
         self.bridge = bridge
 
     @staticmethod
@@ -392,9 +393,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=Path(__file__).resolve().parent / "state")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--backend", choices=[spec.id for spec in BACKENDS], default=DEFAULT_BACKEND,
+                        help="Phone capability adapter; only accessibility is currently implemented")
     args = parser.parse_args(argv)
     try:
-        bridge = AndroidBridge(args.state_dir, args.port)
+        bridge = create_backend(args.backend, {
+            DEFAULT_BACKEND: lambda: AndroidBridge(args.state_dir, args.port)})
+    except BackendUnavailable as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     except (BridgeError, ValueError):
         return 2
     return AndroidMCP(bridge).serve(sys.stdin.buffer, sys.stdout.buffer)

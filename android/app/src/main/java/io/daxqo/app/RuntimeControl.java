@@ -39,7 +39,7 @@ final class RuntimeControl {
             }
             return "OK · 请求已由本机桥接受";
         } catch (Exception e) {
-            return "Linux 环境离线或运行桥不可用；请确认 Linux 容器（如 Termux）已运行后重试";
+            return "Linux 环境离线或运行桥不可用；请确认已有 Linux 环境已运行后重试";
         } finally { if (connection != null) connection.disconnect(); }
     }
 

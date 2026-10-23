@@ -34,7 +34,8 @@ FLAT_FILES = (
     "test_supervisor.py", "test_runtime_control.py", "models-deepseek.json",
     "WORKSPACE_AGENTS.md",
     "task_services.py", "test_task_services.py",
-    "android_mcp_server.py", "test_android_mcp.py", "remote_protocol.py", "test_remote_protocol.py", "email_control.py", "test_email_control.py",
+    "android_mcp_server.py", "test_android_mcp.py", "phone_backends.py", "test_phone_backends.py",
+    "remote_protocol.py", "test_remote_protocol.py", "email_control.py", "test_email_control.py",
     "test_remote_email_mcp.py",
 )
 SCRIPT_FLAT_FILES = ("remote_email_mcp.py",)
@@ -720,8 +721,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Codex execution permission (default: danger-full-access; no automatic fallback)")
     parser.add_argument("--print-pairing", action="store_true",
                         help="Explicitly display the local one-time Android pairing link containing the capability")
-    parser.add_argument("--no-start", action="store_true",
-                        help="Install only; a foreground launcher will manage the service (Termux/PRoot)")
     parser.add_argument("--pairing-scheme", choices=("daxqo", "daxqo-xm"), default="daxqo",
                         help="Select the Android app to pair with")
     return parser.parse_args(argv)
@@ -747,16 +746,13 @@ def main(argv: list[str] | None = None) -> int:
         runtime_dir = _absolute(args.runtime_dir) if args.runtime_dir else None
         version_dir, runtime_created = _install_runtime(app, runtime_dir, arch, cache, log)
         _write_runtime_json(app, version_dir)
-        pid = None
-        if not args.no_start:
-            pid, status = _start_and_check(app, capability, args.sandbox, state / "supervisor.log", log)
-            log(f"Health check passed for DAXQO {status.get('app', {}).get('version', APP_VERSION)}")
+        pid, status = _start_and_check(app, capability, args.sandbox, state / "supervisor.log", log)
+        log(f"Health check passed for DAXQO {status.get('app', {}).get('version', APP_VERSION)}")
 
-        print(f"DAXQO {'installed' if args.no_start else 'is ready'} at {app}")
+        print(f"DAXQO is ready at {app}")
         print(f"Codex runtime: {VERSION} linux-{arch}" + (" (installed)" if runtime_created else " (reused)"))
         print(f"Sandbox: {args.sandbox}")
-        print("Supervisor: not started (--no-start)" if args.no_start else
-              "Supervisor: already running" if pid is None else f"Supervisor PID: {pid}")
+        print("Supervisor: already running" if pid is None else f"Supervisor PID: {pid}")
         print(f"Install log: {log.path}")
         if created:
             print("A private local capability was created in state/capability.")

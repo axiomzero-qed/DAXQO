@@ -181,20 +181,6 @@ public final class MainActivity extends Activity {
         restart.setText("重启服务");
         restart.setOnClickListener(v -> callRuntime("restart"));
         actions.addView(restart);
-        if ("daxqo-xm".equals(getString(R.string.pairing_scheme))) {
-            Button openTermux = new Button(this);
-            openTermux.setText("打开 Termux");
-            openTermux.setOnClickListener(v -> {
-                Intent launch = getPackageManager().getLaunchIntentForPackage("com.termux");
-                if (launch == null) {
-                    status.setText("未安装 Termux；请安装官方 Termux 后重试");
-                    return;
-                }
-                status.setText("请在 Termux 执行 daxqo-xm start，并保持会话打开");
-                startActivity(launch);
-            });
-            actions.addView(openTermux);
-        }
         connectionPanel.addView(actions, new LinearLayout.LayoutParams(-1, -2));
         root.addView(connectionPanel, new LinearLayout.LayoutParams(-1, -2));
         webView = new WebView(this);

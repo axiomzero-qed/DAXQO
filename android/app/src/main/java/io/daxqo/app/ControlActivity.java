@@ -21,6 +21,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import org.json.JSONObject;
+import io.daxqo.app.platform.PlatformProfile;
 
 public final class ControlActivity extends Activity {
     static volatile boolean visible;
@@ -88,9 +89,10 @@ public final class ControlActivity extends Activity {
             }
         });
         button(root, "3  检查电池与后台设置", v -> openSettings(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
-        if ("daxqo-xm".equals(getString(R.string.pairing_scheme))) {
-            root.addView(text("澎湃 OS：请将 DAXQO 和 Termux 的省电策略设为“无限制”；在 DAXQO“权限管理 → 其他权限”中允许“锁屏显示”和“后台弹出界面”。请在系统设置中自行确认，本页不会自动更改授权。", 14, Color.rgb(80, 90, 105)));
-            button(root, "4  检查澎湃OS权限", v -> openAppInfo());
+        PlatformProfile profile = PlatformProfile.fromId(getString(R.string.platform_id));
+        if (!profile.setupGuidance.isEmpty()) {
+            root.addView(text(profile.setupGuidance, 14, Color.rgb(80, 90, 105)));
+            button(root, profile.setupButtonLabel, v -> openAppInfo());
         }
         button(root, "添加桌面控制入口", v -> pinShortcut());
         root.addView(text("手机未设置安全密码且没有 SIM 锁时，远程唤醒会尝试通过系统关闭滑动锁屏。安全密码、SIM 保护或无法确认的锁屏状态需要你亲自解锁。审批不会重启已暂停的控制，也不会替代系统要求的授权。", 14, Color.rgb(80, 90, 105)));

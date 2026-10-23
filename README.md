@@ -6,7 +6,7 @@
 
 ## 中文
 
-XM 小米/Termux 独立版本说明见 [DAXQO for XM](docs/XM.md)。
+DAXQO 是单仓库双平台配置：Standard 为基准版本（基准提交 `8374d89`），XM 小米版共享同一 Android 主源码、backend 与 Agent 核心，仅使用独立包名、配对 scheme 和平台提示。现有功能沿用共享核心。XM 说明见 [DAXQO for XM](docs/XM.md)；架构见[平台架构说明](docs/ARCHITECTURE.md)。
 
 DAXQO 是面向手机的 Agent 工作台：Android 提供持续对话与成果界面，工具在手机已有的 Linux 环境执行，模型通过用户配置的 API 接入。项目采用 [MIT 许可证](LICENSE)；仓库地址为 [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO)。第三方依赖见[第三方说明](THIRD_PARTY_NOTICES.md)。
 
@@ -16,9 +16,15 @@ DAXQO 是面向手机的 Agent 工作台：Android 提供持续对话与成果�
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1
 ```
 
+XM APK 使用 `io.daxqo.xm` / `daxqo-xm`；Standard 默认使用 `io.daxqo.app` / `daxqo`。可用 `-Xm` 构建 XM，或用 Gradle 显式别名 `-Pplatform=xm|standard`；旧 `-Pxm=true` 仍兼容：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\android\build.ps1 -Xm -Lint
+```
+
 ## 快速开始
 
-1. 在已运行的 Linux 环境中，从仓库根目录安装 DAXQO（Python 3.10+）：
+1. 在手机已有且已运行的 Linux 环境中（StepX Neo 用户需先启动厂商 Linux），从仓库根目录安装 DAXQO（Python 3.10+）：
 
    ```sh
    python3 scripts/install_linux.py
@@ -31,7 +37,7 @@ powershell -ExecutionPolicy Bypass -File .\android\build.ps1
    python3 scripts/install_linux.py --print-pairing
    ```
 
-   将显示的链接视为秘密。Capability 只授权本机 DAXQO，不是模型 API key。StepX 用户须先让厂商 Linux 环境运行；DAXQO 不会创建或唤醒它。
+   XM 构建需指定 `--pairing-scheme daxqo-xm`。将显示的链接视为秘密。Capability 只授权本机 DAXQO，不是模型 API key。DAXQO 不会创建或唤醒厂商 Linux 环境。Standard 与 XM 共用 `install_linux.py` → supervisor → 本机 `18882`/`18880` 服务路径。
 
 4. 打开已配对的 DAXQO App，在设置中填写自己的 DeepSeek API key 并验证连接，即可创建任务。
 
@@ -71,7 +77,7 @@ docs/              接口、安装、平台边界与验收说明
 
 ```sh
 cd backend
-python3 -m unittest test_server test_supervisor test_runtime_control test_task_services test_android_mcp test_remote_protocol test_email_control test_remote_email_mcp
+python3 -m unittest test_server test_supervisor test_runtime_control test_task_services test_android_mcp test_phone_backends test_remote_protocol test_email_control test_remote_email_mcp
 ```
 
 测试使用明确标记的协议/进程夹具，不替代真实手机或模型验收。Windows 若尚无 Android 构建工具，可运行：
@@ -86,7 +92,7 @@ powershell -ExecutionPolicy Bypass -File .\android\build.ps1 -InstallTools
 
 ## English
 
-For the separate Xiaomi/Termux build, see [DAXQO for XM](docs/XM.md).
+DAXQO is one repository with two platform configurations. Standard is the baseline (baseline commit `8374d89`); XM shares the Android main source, backend, and Agent core, with its own application ID, pairing scheme, and platform guidance. Existing features use the shared core. See [DAXQO for XM](docs/XM.md) and the [platform architecture](docs/ARCHITECTURE.md).
 
 DAXQO is a mobile Agent workspace. Its Android app provides persistent conversations and a results interface; tools run inside a Linux environment already available on the phone, and models are connected through an API configured by the user. The project uses the [MIT License](LICENSE); its repository is [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO). See [third-party notices](THIRD_PARTY_NOTICES.md) for external dependencies.
 
@@ -96,9 +102,15 @@ The current source is developing V0.4; see the [V0.4 installation, permissions, 
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1
 ```
 
+The XM APK uses `io.daxqo.xm` / `daxqo-xm`; Standard defaults to `io.daxqo.app` / `daxqo`. Build XM with `-Xm`, or use the explicit Gradle alias `-Pplatform=xm|standard`; the existing `-Pxm=true` alias remains supported:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\android\build.ps1 -Xm -Lint
+```
+
 ### Quick start
 
-1. In an already-running Linux environment, install DAXQO from the repository root (Python 3.10 or newer):
+1. Install DAXQO from the repository root in a Linux environment already available and running on the phone (StepX Neo users must start the vendor Linux environment first; Python 3.10 or newer):
 
    ```sh
    python3 scripts/install_linux.py
@@ -111,7 +123,7 @@ powershell -ExecutionPolicy Bypass -File .\android\build.ps1
    python3 scripts/install_linux.py --print-pairing
    ```
 
-   Treat the displayed link as a secret. Its capability authorizes the local DAXQO service and is not a model API key. On StepX, the vendor Linux environment must already be running; DAXQO cannot create or wake it.
+   For the XM build, add `--pairing-scheme daxqo-xm`. Treat the displayed link as a secret. Its capability authorizes the local DAXQO service and is not a model API key. DAXQO cannot create or wake vendor Linux. Standard and XM share the `install_linux.py` → supervisor → local `18882`/`18880` service path.
 
 4. Open the paired DAXQO app, enter your own DeepSeek API key in Settings, verify the connection, and create a task.
 
@@ -151,7 +163,7 @@ The backend uses the Python standard library. Task execution additionally requir
 
 ```sh
 cd backend
-python3 -m unittest test_server test_supervisor test_runtime_control test_task_services test_android_mcp test_remote_protocol test_email_control test_remote_email_mcp
+python3 -m unittest test_server test_supervisor test_runtime_control test_task_services test_android_mcp test_phone_backends test_remote_protocol test_email_control test_remote_email_mcp
 ```
 
 Tests use clearly labeled protocol/process fixtures and do not replace real-device or model acceptance. On Windows, if Android build tools are not installed, run:

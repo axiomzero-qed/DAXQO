@@ -1,5 +1,7 @@
 # XM 真机复测：2026-10-23
 
+> 历史实验记录：以下验收使用此前的 Termux/PRoot 运行环境。当前架构已撤下这条安装路径，见 [架构说明](ARCHITECTURE.md) 与 [XM 当前范围](XM.md)。以下历史命令、产物和成功记录不能作为当前 XM 共用 Linux 路径的端到端验收，也不表示小米可运行 Neo 厂商 Linux。
+
 设备：Xiaomi 2410DPN6CC，HyperOS OS3.0.309.0.WOBCNXM，Android 16 / ARM64。
 版本：DAXQO for XM 0.4.0-xm，Codex 0.163.0，模型 DeepSeek Flash。
 以下时间均为北京时间（UTC+08:00）。本轮未读取或复制模型 API key；只调用手机内已配置的服务。
