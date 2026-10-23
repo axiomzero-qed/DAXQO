@@ -1,9 +1,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
     <application
         android:allowBackup="false"
         android:usesCleartextTraffic="true"
-        android:label="达序 DAXQO"
+        android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:forceDarkAllowed="false"
@@ -15,6 +22,7 @@
             android:launchMode="singleTop"
             android:screenOrientation="unspecified"
             android:windowSoftInputMode="adjustResize">
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -23,8 +31,23 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="daxqo" android:host="connect" />
+                <data android:scheme="${pairingScheme}" android:host="connect" />
             </intent-filter>
         </activity>
+        <activity android:name=".ControlActivity" android:exported="false" />
+        <activity android:name=".WakeActivity" android:exported="false"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:showWhenLocked="true" android:turnScreenOn="true"
+            android:theme="@style/AppTheme" />
+        <service android:name=".DeviceAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true"
+            android:label="达序手机控制">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/device_accessibility" />
+        </service>
     </application>
 </manifest>

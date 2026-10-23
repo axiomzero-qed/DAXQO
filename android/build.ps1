@@ -1,5 +1,8 @@
-param([switch]$InstallTools)
+param([switch]$InstallTools, [switch]$Lint, [switch]$Xm, [ValidateSet('standard','xm')][string]$Platform)
 $ErrorActionPreference = 'Stop'
+if ($PSBoundParameters.ContainsKey('Platform') -and $Xm -and $Platform -ne 'xm') {
+    throw 'Conflicting -Xm and -Platform values.'
+}
 $androidDir = $PSScriptRoot
 $repoDir = Split-Path -Parent $androidDir
 $toolsDir = Join-Path $repoDir '.tools'
@@ -84,7 +87,13 @@ $localProps = Join-Path $mappedAndroidDir 'local.properties'
 "sdk.dir=$($env:ANDROID_HOME.Replace('\','\\'))" | Set-Content -Encoding ASCII $localProps
 Push-Location $mappedAndroidDir
 try {
-    & (Join-Path $mappedTools 'gradle-8.10.2\bin\gradle.bat') --no-daemon assembleDebug
+    $buildTasks = @()
+    if ($PSBoundParameters.ContainsKey('Platform')) {
+        $buildTasks += "-Pplatform=$Platform"
+    } elseif ($Xm) { $buildTasks += '-Pxm=true' }
+    $buildTasks += 'assembleDebug'
+    if ($Lint) { $buildTasks += 'lintDebug' }
+    & (Join-Path $mappedTools 'gradle-8.10.2\bin\gradle.bat') --no-daemon @buildTasks
     if ($LASTEXITCODE -ne 0) { throw 'Android debug APK build failed.' }
 } finally {
     Pop-Location

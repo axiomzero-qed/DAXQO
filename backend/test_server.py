@@ -17,6 +17,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import server
+import android_mcp_server as android_mcp
 
 
 # This is deliberately a test-only JSON-RPC child process, not a simulated Codex install.
@@ -73,6 +74,9 @@ for line in sys.stdin:
             continue
         if p["input"][0].get("text") == "completion-race":
             print(json.dumps({"jsonrpc":"2.0","id":m["id"],"error":{"code":-32000,"message":"active turn cannot accept same-turn steering"}}), flush=True)
+            # Exercise rejection-before-completion instead of relying on which
+            # host thread happens to run first after the RPC reply.
+            time.sleep(0.05)
             print(json.dumps({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":p["threadId"],"turn":{"id":p["expectedTurnId"],"status":"completed"}}}), flush=True)
             continue
         print(json.dumps({"jsonrpc":"2.0","method":"fixture/steered","params":{"clientUserMessageId":p.get("clientUserMessageId"),"expectedTurnId":p["expectedTurnId"]}}), flush=True)
@@ -99,6 +103,48 @@ def pid_running(pid):
         if len(fields) > 2 and fields[2] == "Z": return False
     except OSError: pass
     return True
+
+
+class AppServerRequestBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.queued = Mock()
+        self.engine = server.AppServer(["unused-fixture"], Path("unused-fixture-home"), lambda _: None,
+                                       on_request=self.queued)
+        self.engine.respond = Mock()
+
+    def test_only_implemented_decision_requests_reach_approval_ui(self):
+        for method in ("item/commandExecution/requestApproval", "item/fileChange/requestApproval"):
+            with self.subTest(method=method):
+                self.queued.reset_mock(); self.engine.respond.reset_mock()
+                params = {"threadId": "thread-fixture", "turnId": "turn-fixture", "title": "Fixture action"}
+                self.engine._handle_server_request({"id": 17, "method": method, "params": params})
+                self.queued.assert_called_once_with({"id": 17, "key": "17", "method": method, "params": params})
+                self.engine.respond.assert_not_called()
+
+    def test_user_input_and_unknown_approval_like_requests_are_never_auto_accepted(self):
+        for method in ("item/tool/requestUserInput", "mcpServer/elicitation/request",
+                       "item/permissions/requestApproval", "fixture/requestApproval",
+                       "item/commandExecution/requestApproval/extra", "item/commandexecution/requestapproval"):
+            with self.subTest(method=method):
+                self.queued.reset_mock(); self.engine.respond.reset_mock()
+                # A tool/server name in question text is not evidence of authorization.
+                params = {"threadId": "thread-fixture", "questions": [{"id": "daxqo_android",
+                    "question": "Accept android_action?", "options": [{"label": "Accept"}, {"label": "Decline"}]}]}
+                self.engine._handle_server_request({"id": "untrusted", "method": method, "params": params})
+                self.queued.assert_not_called()
+                self.engine.respond.assert_called_once_with("untrusted", error={"code": -32601, "message": "Unsupported app-server request"})
+
+    def test_supported_request_rejects_malformed_params_and_queue_failure(self):
+        for params in (None, [], ["bad"], "bad", 1):
+            with self.subTest(params=params):
+                self.engine.respond.reset_mock()
+                self.engine._handle_server_request({"id": 5, "method": "item/fileChange/requestApproval", "params": params})
+                self.engine.respond.assert_called_once_with(5, error={"code": -32602, "message": "Invalid approval request params"})
+        self.queued.assert_not_called()
+        self.queued.side_effect = RuntimeError("fixture failure")
+        self.engine.respond.reset_mock()
+        self.engine._handle_server_request({"id": 6, "method": "item/fileChange/requestApproval", "params": {}})
+        self.engine.respond.assert_called_once_with(6, error={"code": -32603, "message": "Unable to queue approval request"})
 
 
 class HarnessTests(unittest.TestCase):
@@ -520,7 +566,10 @@ for line in sys.stdin:
         self.harness.sandbox = "danger-full-access"
         task = self.harness.start_task({"prompt": "complete a fixture task", "model": "fixture-model"})
         deadline = time.time() + 3
-        while time.time() < deadline and self.harness.store.row(task["id"])["status"] not in ("completed", "failed"):
+        while time.time() < deadline:
+            saved = self.harness.store.row(task["id"])
+            rejected = any(e.get("method") == "fixture/unsupported-rejected" for e in self.events)
+            if saved["status"] in ("completed", "failed") and saved["turn_id"] == "turn-1" and rejected: break
             time.sleep(0.02)
         saved = self.harness.store.row(task["id"])
         self.assertEqual(saved["status"], "completed", saved)
@@ -546,6 +595,15 @@ for line in sys.stdin:
         self.assertEqual(resumed_row["turn_id"], "turn-2")
         self.assertNotIn("stale answer", resumed_row["result"])
         self.assertTrue(any(e.get("method") == "fixture/sandbox" and e["params"] == {"method": "thread/resume", "sandbox": "danger-full-access"} for e in self.events))
+
+    def test_turn_completion_persists_id_when_it_arrives_before_start_response(self):
+        self.insert_running_task("completion-before-start-response")
+        self.harness.store.update("completion-before-start-response", turn_id=None)
+        self.harness._engine_event({"method": "turn/completed", "params": {
+            "threadId": "thread-terminal", "turn": {"id": "turn-terminal", "status": "completed"}}})
+        row = self.harness.store.row("completion-before-start-response")
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["turn_id"], "turn-terminal")
 
     def test_messages_steer_idempotently_and_queue_until_turn_id_exists(self):
         stamp = server.now()
@@ -703,7 +761,7 @@ for line in sys.stdin:
             with urllib.request.urlopen(req) as response:
                 result = json.loads(response.read())
                 self.assertTrue(result["engine"]["connected"])
-                self.assertEqual(result["app"], {"name":"DAXQO", "version":"0.3.0"})
+                self.assertEqual(result["app"], {"name":"DAXQO", "version":"0.4.0"})
         finally:
             http.shutdown(); http.server_close()
 
@@ -855,6 +913,58 @@ for line in sys.stdin:
         for model in catalog["models"]:
             self.assertEqual(model["multi_agent_version"], "v1")
             self.assertFalse(model["supports_search_tool"])
+
+    def test_android_mcp_preapproval_is_limited_to_fixed_adapter_and_three_tools(self):
+        self.harness._write_codex_config()
+        config = (self.harness.codex_home / "config.toml").read_text(encoding="utf-8")
+        self.assertIn('approval_policy = "on-request"', config)
+        self.assertNotIn('approval_policy = "never"', config)
+        block = config.split("[mcp_servers.daxqo_android]\n", 1)[1].split("\n[", 1)[0]
+        self.assertIn("command = " + json.dumps(sys.executable), block)
+        self.assertIn("args = " + json.dumps([str(Path(server.__file__).resolve().parent / "android_mcp_server.py"),
+            "--state-dir", str(self.harness.state), "--port", "18883"]), block)
+        self.assertIn('enabled_tools = ["android_status", "android_observe", "android_action"]', block)
+        self.assertGreaterEqual(int(next(line.split("=", 1)[1] for line in block.splitlines()
+            if line.startswith("tool_timeout_sec"))), 2 * android_mcp.HTTP_TIMEOUT)
+        self.assertIn('default_tools_approval_mode = "prompt"', block)
+        for tool in ("android_status", "android_observe", "android_action"):
+            self.assertIn("[mcp_servers.daxqo_android.tools." + tool + ']\napproval_mode = "approve"', config)
+        self.assertEqual(config.count('approval_mode = "approve"'), 3)
+        self.assertNotIn(self.harness.capability, config)
+
+    def test_android_mcp_progress_exposes_bounded_error_without_tool_arguments(self):
+        self.insert_running_task("android-progress")
+        sensitive = "secret-image-bytes capability=fixture-secret"
+        error = {"ok": False, "error": {"code": "timeout", "message": "读取界面超时"}}
+        item = {"type": "mcpToolCall", "server": "daxqo_android", "tool": "android_observe",
+            "status": "failed", "arguments": {"text": "never expose", "apiKey": sensitive},
+            "result": {"content": [{"type": "text", "text": json.dumps(error)},
+                {"type": "image", "mimeType": "image/png", "data": sensitive}]}}
+        self.harness._engine_event({"method": "item/completed", "params": {
+            "threadId": "thread-terminal", "turnId": "turn-terminal", "item": item}})
+        event = self.harness.store.progress_rows("android-progress")[-1]
+        self.assertEqual(event["summary"], "读取手机界面")
+        self.assertEqual(event["errorCode"], "timeout")
+        self.assertIn("读取界面超时", event["error"])
+        public = json.dumps(event)
+        for private in ("never expose", "fixture-secret", "secret-image-bytes", "image/png"):
+            self.assertNotIn(private, public)
+
+    def test_non_android_mcp_progress_does_not_expose_android_error_details(self):
+        self.insert_running_task("other-mcp-progress")
+        item = {"type": "mcpToolCall", "server": "other_server", "tool": "lookup", "status": "failed",
+            "arguments": {"apiKey": "fixture-secret"},
+            "result": {"content": [{"type": "text", "text": json.dumps({"ok": False,
+                "error": {"code": "timeout", "message": "private Android detail"}})}]}}
+        self.harness._engine_event({"method": "item/completed", "params": {
+            "threadId": "thread-terminal", "turnId": "turn-terminal", "item": item}})
+        event = self.harness.store.progress_rows("other-mcp-progress")[-1]
+        self.assertEqual(event["summary"], "外部工具")
+        self.assertNotIn("errorCode", event)
+        self.assertNotIn("error", event)
+        public = json.dumps(event)
+        self.assertNotIn("fixture-secret", public)
+        self.assertNotIn("private Android detail", public)
 
     def test_initial_attachment_message_separates_display_text_from_native_path(self):
         body = {"prompt": ""}
@@ -1008,6 +1118,99 @@ for line in sys.stdin:
         try: link.symlink_to(outside)
         except (OSError, NotImplementedError): self.skipTest("symlinks are not available on this host")
         with self.assertRaises(ValueError): self.harness.read_workspace_text("escape.txt")
+
+
+class AndroidOwnerConsentTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.h = server.Harness("not-installed", root/"state", root/"workspace", "127.0.0.1", 18880,
+                                test_engine=Mock(connected=True, account={"authenticated": True}))
+        stamp = server.now()
+        with self.h.store.db:
+            for ident in ("owner", "other"):
+                self.h.store.db.execute("INSERT INTO tasks(id,title,prompt,status,created_at,updated_at,thread_id,turn_id) VALUES(?,?,?,?,?,?,?,?)",
+                    (ident, "Install requested app", "owner request", "running", stamp, stamp, "thread-"+ident, "turn-1"))
+        self.a = {"id":"746bdd02-1c84-4f1a-9ed4-cb880402f4ec", "status":"pending", "action":"tap",
+                  "packageName":"com.android.packageinstaller", "summary":"确认安装所请求的应用", "expiresAt":int((time.time()+600)*1000)}
+        self.snapshot = {"policyMode":"confirm", "controlEnabled":True, "approvals":[self.a]}
+        self.bridge = Mock(); self.bridge.status.side_effect = lambda: self.snapshot
+        def decide(method, path, body):
+            self.a["status"] = "approved" if body["decision"] == "accept" else "declined"
+            return dict(self.a)
+        self.bridge.request.side_effect = decide
+        self.p = patch.object(server, "AndroidBridge", return_value=self.bridge); self.p.start()
+        self.h._record_android_tool("owner", self.item({"code":"approval_required", "approval":self.a}))
+
+    @staticmethod
+    def item(error):
+        return {"result":{"content":[{"type":"text", "text":json.dumps({"ok":False,"error":error})}]}}
+
+    def tearDown(self):
+        self.h.close_android_permissions(); self.p.stop(); self.h.store.db.close(); self.temp.cleanup()
+
+    def test_cross_task_cannot_claim_or_approve_the_existing_request(self):
+        self.h._record_android_tool("other", self.item({"code":"approval_required", "approval":self.a}))
+        self.assertEqual(self.h.android_permission_approvals("other"), [])
+        with self.assertRaises(ValueError): self.h.decide_android_permission(self.a["id"], "accept", task_id="other")
+        self.bridge.request.assert_not_called()
+        # A shared physical operation cannot be claimed by a second task, nor
+        # may that task claim completion while still waiting for consent.
+        self.h._task_events["other"] = [{"threadId":"thread-other", "turnId":"turn-1"}]
+        with patch.object(server.threading, "Thread"):
+            self.h._engine_event({"method":"turn/completed", "params":{"threadId":"thread-other", "turnId":"turn-1", "status":"completed"}})
+        self.assertEqual(self.h.store.row("other")["status"], "waiting_approval")
+
+    def test_accept_continues_original_task_once_and_replay_adds_no_grant(self):
+        self.h.store.update("owner", status="waiting_approval"); self.h.send_message = Mock()
+        self.h.decide_android_permission(self.a["id"], "accept", task_id="owner")
+        self.h.decide_android_permission(self.a["id"], "accept", task_id="owner")
+        self.h._resume_android_approved()
+        self.bridge.request.assert_called_once(); self.h.send_message.assert_called_once()
+        self.assertEqual(self.h.send_message.call_args.args[0], "owner")
+
+    def test_decline_stops_without_resuming(self):
+        self.h.store.update("owner", status="waiting_approval"); self.h.send_message = Mock()
+        self.h.decide_android_permission(self.a["id"], "decline")
+        self.assertEqual(self.h.store.row("owner")["status"], "stopped"); self.h.send_message.assert_not_called()
+
+    def test_native_restart_invalidates_pending_and_never_restores_consent(self):
+        self.snapshot["approvals"] = []
+        with self.assertRaises(ValueError): self.h.decide_android_permission(self.a["id"], "accept")
+        self.bridge.request.assert_not_called()
+        self.assertEqual(self.h.android_permission_approvals()[0]["status"], "stale")
+
+    def test_stop_revokes_pending_and_prevents_later_accept(self):
+        self.h.store.update("owner", status="waiting_approval"); self.h.stop("owner")
+        self.assertEqual(self.a["status"], "declined")
+        with self.assertRaises(ValueError): self.h.decide_android_permission(self.a["id"], "accept")
+
+    def test_model_turn_end_preserves_waiting_instead_of_completed(self):
+        self.h._task_events["owner"] = [{"threadId":"thread-owner", "turnId":"turn-1"}]
+        with patch.object(server.threading, "Thread"):
+            self.h._engine_event({"method":"turn/completed", "params":{"threadId":"thread-owner", "turnId":"turn-1", "status":"completed"}})
+        self.assertEqual(self.h.store.row("owner")["status"], "waiting_approval")
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "Linux process identity checks")
+class ProcDiscoveryTests(unittest.TestCase):
+    def test_kernel_without_task_children_uses_verified_uid_snapshot(self):
+        task = MagicMock()
+        task.joinpath.return_value.read_text.side_effect = FileNotFoundError()
+        task.exists.return_value = True  # Android kernel lacks the children file.
+        own = Mock(name="own")
+        own.name = "101"
+        own.stat.return_value.st_uid = 1000
+        other = Mock(name="other")
+        other.name = "102"
+        other.stat.return_value.st_uid = 2000
+        identities = {100: (100, 1000, 1, 10), 101: (101, 1000, 100, 11)}
+        with patch.object(server, "Path") as paths, patch.object(server.os, "scandir") as scan, \
+                patch.object(server, "_linux_process_identity", side_effect=identities.get) as identify:
+            paths.return_value.iterdir.return_value = [task]
+            scan.return_value.__enter__.return_value = iter([own, other])
+            self.assertEqual(server._linux_descendant_identities(100), [(101, 1000, 11)])
+            self.assertNotIn(unittest.mock.call(102), identify.call_args_list)
 
 
 if __name__ == "__main__": unittest.main()

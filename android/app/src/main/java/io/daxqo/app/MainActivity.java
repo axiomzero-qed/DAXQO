@@ -40,6 +40,7 @@ import java.net.URL;
 import java.security.MessageDigest;
 
 public final class MainActivity extends Activity {
+    private static MainActivity visibleActivity;
     private static final String UI_BASE = "http://127.0.0.1:18880/";
     private static final String PREFS = "pairing_private";
     private static final String CAP_KEY = "capability";
@@ -53,6 +54,31 @@ public final class MainActivity extends Activity {
     private boolean connectionInProgress;
     private static final int FILE_CHOOSER_REQUEST = 1042;
     private ValueCallback<Uri[]> fileChooserCallback;
+
+    @Override protected void onStart() { super.onStart(); visibleActivity = this; }
+    @Override protected void onStop() {
+        if (visibleActivity == this) visibleActivity = null;
+        super.onStop();
+    }
+    @Override protected void onResume() {
+        super.onResume();
+        if (shouldRetryConnection(trustedGuiLoaded, connectionInProgress)) prepareAndLoadGui();
+    }
+    static boolean shouldRetryConnection(boolean trusted, boolean inProgress) { return !trusted && !inProgress; }
+    static boolean mayReturnToTarget(boolean visible, boolean trusted, boolean focused, boolean closing) {
+        return visible && trusted && focused && !closing;
+    }
+    // Package-only native continuation. Not a JS bridge, intent or tool action.
+    // Called exactly once when consent transitions from pending to approved.
+    static void returnToTargetAfterApproval() {
+        MainActivity activity = visibleActivity;
+        if (activity == null || !mayReturnToTarget(visibleActivity == activity, activity.trustedGuiLoaded,
+                activity.hasWindowFocus(), activity.isFinishing() || activity.isDestroyed())) return;
+        if (activity.webView == null || activity.webView.getVisibility() != View.VISIBLE) return;
+        try {
+            if (activity.isGuiUrl(Uri.parse(activity.webView.getUrl()))) activity.moveTaskToBack(true);
+        } catch (Exception ignored) { /* Consent remains valid if Android refuses task navigation. */ }
+    }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -73,17 +99,22 @@ public final class MainActivity extends Activity {
         consumePairIntent(getIntent());
         buildView();
         prepareAndLoadGui();
+        if (ControlActivity.ACTION_CONTROL.equals(getIntent().getAction())) {
+            startActivity(new Intent(this, ControlActivity.class));
+            setIntent(new Intent(this, MainActivity.class));
+        }
     }
 
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(new Intent(this, MainActivity.class));
+        if (ControlActivity.ACTION_CONTROL.equals(intent.getAction())) startActivity(new Intent(this, ControlActivity.class));
         if (consumePairIntent(intent)) prepareAndLoadGui();
     }
 
     private boolean consumePairIntent(Intent intent) {
         Uri uri = intent == null ? null : intent.getData();
-        if (uri == null || !"daxqo".equals(uri.getScheme()) || !"connect".equals(uri.getHost())) return false;
+        if (uri == null || !getString(R.string.pairing_scheme).equals(uri.getScheme()) || !"connect".equals(uri.getHost())) return false;
         String fragment = uri.getFragment();
         String cap = fragment != null && fragment.startsWith("token=") ? Uri.decode(fragment.substring(6)) : null;
         if (cap == null || cap.length() < 32 || cap.length() > 4096 || !cap.matches("[A-Za-z0-9._~-]+")) {
@@ -117,6 +148,19 @@ public final class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.WHITE);
+        LinearLayout nativeActions = new LinearLayout(this);
+        nativeActions.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        nativeActions.setPadding(12, 0, 12, 0);
+        TextView brand = new TextView(this);
+        brand.setText(R.string.app_name);
+        brand.setTextSize(15);
+        brand.setTextColor(Color.rgb(35, 48, 64));
+        nativeActions.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
+        Button deviceControl = new Button(this);
+        deviceControl.setText("手机控制");
+        deviceControl.setOnClickListener(v -> startActivity(new Intent(this, ControlActivity.class)));
+        nativeActions.addView(deviceControl);
+        root.addView(nativeActions, new LinearLayout.LayoutParams(-1, -2));
         connectionPanel = new LinearLayout(this);
         connectionPanel.setOrientation(LinearLayout.VERTICAL);
         connectionPanel.setGravity(Gravity.CENTER_VERTICAL);
@@ -205,7 +249,7 @@ public final class MainActivity extends Activity {
             }
             @Override public void onSafeBrowsingHit(WebView view, WebResourceRequest request,
                     int threatType, SafeBrowsingResponse callback) {
-                callback.backToSafety(true);
+                if (Build.VERSION.SDK_INT >= 27) callback.backToSafety(true);
             }
         });
         webView.addJavascriptInterface(new FileDownloads(), "DAXQOFiles");
@@ -458,6 +502,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        if (visibleActivity == this) visibleActivity = null;
         if (fileChooserCallback != null) {
             fileChooserCallback.onReceiveValue(null);
             fileChooserCallback = null;

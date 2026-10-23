@@ -1,5 +1,6 @@
 """Temporary USB development session. Local capability stays in process memory."""
 import json
+import getpass
 import os
 from pathlib import Path
 import shlex
@@ -12,6 +13,10 @@ import xml.etree.ElementTree as ET
 sys.stdout.reconfigure(encoding='utf-8')
 ADB = Path(os.environ.get('DAXQO_ADB', 'adb'))
 SERIAL = os.environ.get('DAXQO_SERIAL')
+APP_PACKAGE = os.environ.get('DAXQO_ANDROID_PACKAGE', 'io.daxqo.app')
+if APP_PACKAGE not in ('io.daxqo.app', 'io.daxqo.xm'):
+    raise SystemExit('DAXQO_ANDROID_PACKAGE must select a DAXQO app')
+PAIRING_SCHEME = 'daxqo-xm' if APP_PACKAGE == 'io.daxqo.xm' else 'daxqo'
 HANDOFF = '/sdcard/Download/daxqo-stage/gui-handoff.json'
 
 
@@ -25,7 +30,7 @@ def adb(*args):
 def main():
     if os.environ.get('DAXQO_PAIRING_SOURCE') == 'android-debug':
         # Development APK only: read our own private pairing, never model keys.
-        preferences = ET.fromstring(adb('exec-out', 'run-as', 'io.daxqo.app',
+        preferences = ET.fromstring(adb('exec-out', 'run-as', APP_PACKAGE,
             'cat', 'shared_prefs/pairing_private.xml'))
         entry = preferences.find("string[@name='capability']")
         token = entry.text if entry is not None else None
@@ -38,7 +43,7 @@ def main():
     ports = {}
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        for port in (18880, 18882):
+        for port in (18880, 18882, 18883):
             forwarded = adb('forward', 'tcp:0', 'tcp:' + str(port))
             if not forwarded.isdigit(): raise RuntimeError('Invalid forwarding result')
             ports[port] = forwarded
@@ -48,14 +53,18 @@ def main():
                 command = json.loads(line)
                 if command.get('action') == 'exit': break
                 if command.get('action') == 'pair-app':
-                    uri = 'daxqo://connect#token=' + token
-                    adb('shell', 'am start -a android.intent.action.VIEW -d ' + shlex.quote(uri) + ' -p io.daxqo.app')
+                    uri = PAIRING_SCHEME + '://connect#token=' + token
+                    adb('shell', 'am start -a android.intent.action.VIEW -d ' + shlex.quote(uri) + ' -p ' + APP_PACKAGE)
                     result = {'pairing_intent_sent': True}
                 else:
                     path = command.get('path', '/api/status')
                     if not path.startswith(('/api/', '/healthz')): raise ValueError('Invalid API path')
-                    port = 18882 if command.get('target') == 'runtime' else 18880
+                    port = {'runtime': 18882, 'android': 18883}.get(command.get('target'), 18880)
                     payload = command.get('body')
+                    if command.get('action') == 'configure-mail':
+                        if path != '/api/remote/settings': raise ValueError('Invalid settings path')
+                        payload = dict(payload or {})
+                        payload['password'] = getpass.getpass('Mail authorization code (hidden): ')
                     if command.get('manifest'):
                         payload = json.loads(Path(command['manifest']).read_text(encoding='utf-8'))
                     binary = Path(command['uploadFile']).read_bytes() if command.get('uploadFile') else None

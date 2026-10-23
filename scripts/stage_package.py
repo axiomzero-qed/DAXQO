@@ -7,19 +7,23 @@ import shutil
 ROOT = Path(__file__).resolve().parent.parent
 FLAT = ('server.py', 'supervisor.py', 'runtime_control.py', 'test_server.py',
         'test_supervisor.py', 'test_runtime_control.py', 'task_services.py', 'test_task_services.py',
+        'android_mcp_server.py', 'test_android_mcp.py', 'phone_backends.py', 'test_phone_backends.py',
+        'remote_protocol.py', 'test_remote_protocol.py', 'email_control.py', 'test_email_control.py',
+        'test_remote_email_mcp.py',
         'models-deepseek.json', 'WORKSPACE_AGENTS.md')
+SCRIPT_FLAT = ('remote_email_mcp.py',)
 
 
 def main():
     backend = ROOT / 'backend'
     output = ROOT / 'dist' / 'package' / 'backend'
     output.mkdir(parents=True, exist_ok=True)
-    files = [backend / name for name in FLAT]
-    files += sorted(path for path in (backend / 'static').rglob('*') if path.is_file())
+    files = [(backend / name, name) for name in FLAT]
+    files += [(ROOT / 'scripts' / name, name) for name in SCRIPT_FLAT]
+    files += [(path, path.relative_to(backend).as_posix()) for path in sorted((backend / 'static').rglob('*')) if path.is_file()]
     manifest = {'version': (ROOT / 'VERSION').read_text().strip(), 'files': {}}
-    for source in files:
+    for source, relative in files:
         if source.is_symlink(): raise RuntimeError('Package sources must be regular files')
-        relative = source.relative_to(backend).as_posix()
         target = output / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)

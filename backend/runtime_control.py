@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 DEFAULT_PORT = 18882
 DEFAULT_BACKEND_PORT = 18880
 MAX_REQUEST = 1024 * 1024
@@ -33,6 +33,9 @@ ALLOWED_FILES = {
     "test_supervisor.py", "test_runtime_control.py", "models-deepseek.json",
     "WORKSPACE_AGENTS.md",
     "task_services.py", "test_task_services.py",
+    "android_mcp_server.py", "test_android_mcp.py", "phone_backends.py", "test_phone_backends.py",
+    "remote_protocol.py", "test_remote_protocol.py", "email_control.py", "test_email_control.py",
+    "remote_email_mcp.py", "test_remote_email_mcp.py",
 }
 
 
@@ -519,7 +522,7 @@ class RuntimeManager:
             return self._write_test_report(int(result), "")
         try:
             result = subprocess.run([sys.executable, "-m", "unittest", "test_server", "test_supervisor",
-                                     "test_runtime_control", "test_task_services"], cwd=str(cwd), stdin=subprocess.DEVNULL,
+                                     "test_runtime_control", "test_task_services", "test_android_mcp", "test_phone_backends", "test_remote_protocol", "test_remote_email_mcp", "test_email_control"], cwd=str(cwd), stdin=subprocess.DEVNULL,
                                     capture_output=True, text=True, encoding="utf-8", errors="replace",
                                     timeout=600, check=False)
             output = "[stdout]\n" + (result.stdout or "") + "\n[stderr]\n" + (result.stderr or "")

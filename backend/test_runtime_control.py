@@ -83,7 +83,7 @@ class RuntimeBridgeApiTests(unittest.TestCase):
         self.assertEqual(status, 401)
         status, data = self.request()
         self.assertEqual(status, 200)
-        self.assertEqual(data["app"], {"name": "DAXQO", "version": "0.3.0"})
+        self.assertEqual(data["app"], {"name": "DAXQO", "version": "0.4.0"})
         self.assertEqual(data["state"], "stopped")
 
     def test_host_origin_and_bearer_are_restricted(self):
@@ -112,9 +112,9 @@ class RuntimeBridgeApiTests(unittest.TestCase):
 
     def test_update_rejects_traversal_unknown_source_symlink_and_bad_digest(self):
         cases = [
-            ({"version": "0.3.0", "files": {"../server.py": "0" * 64}}, 400),
-            ({"version": "0.3.0", "files": {"state/capability": "0" * 64}}, 403),
-            ({"version": "0.3.0", "files": {"server.py": "0" * 64}}, 400),
+            ({"version": "0.4.0", "files": {"../server.py": "0" * 64}}, 400),
+            ({"version": "0.4.0", "files": {"state/capability": "0" * 64}}, 403),
+            ({"version": "0.4.0", "files": {"server.py": "0" * 64}}, 400),
         ]
         for body, expected in cases:
             with self.subTest(body=body):
@@ -128,7 +128,7 @@ class RuntimeBridgeApiTests(unittest.TestCase):
                 link.symlink_to(outside)
             except (OSError, NotImplementedError):
                 return
-            body = {"version": "0.3.0", "files": {"server.py": hashlib.sha256(b"fixture").hexdigest()}}
+            body = {"version": "0.4.0", "files": {"server.py": hashlib.sha256(b"fixture").hexdigest()}}
             status, _ = self.request("POST", "/api/runtime/update", body=body)
             self.assertEqual(status, 403)
 
@@ -155,10 +155,20 @@ class RuntimeBridgeApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
 
     def test_oversize_request_is_rejected(self):
-        body = {"version": "0.3.0", "files": {"server.py": "0" * 64},
-                "padding": "x" * bridge.MAX_REQUEST}
-        status, _ = self.request("POST", "/api/runtime/update", body=body)
-        self.assertEqual(status, 413)
+        # The server rejects the declared length before reading the body. Sending
+        # a huge body concurrently races its early close on Android/Linux TCP.
+        conn = http.client.HTTPConnection("127.0.0.1", self.http.server_port, timeout=3)
+        try:
+            conn.putrequest("POST", "/api/runtime/update")
+            conn.putheader("Authorization", "Bearer fixture-capability-token-0123456789")
+            conn.putheader("Content-Type", "application/json")
+            conn.putheader("Content-Length", str(bridge.MAX_REQUEST + 1))
+            conn.endheaders()
+            response = conn.getresponse()
+            self.assertEqual(response.status, 413)
+            response.read()
+        finally:
+            conn.close()
 
     def test_oversize_staged_file_is_rejected(self):
         content = b"x" * (bridge.MAX_FILE + 1)
@@ -196,7 +206,7 @@ class RuntimeBridgeApiTests(unittest.TestCase):
         if os.name != "nt":
             self.assertEqual(os.stat(report).st_mode & 0o777, 0o600)
         self.assertEqual(target.read_text(encoding="utf-8"), "new fixture source")
-        backup = next((self.root / "state" / "backups").glob("0.3.0-*/harness.sqlite3"))
+        backup = next((self.root / "state" / "backups").glob("0.4.0-*/harness.sqlite3"))
         self.assertTrue(backup.is_file())
         self.assertFalse(any((self.root / "state" / "backups").rglob("provider.json")))
         self.assertEqual(fixture.starts, 1)
