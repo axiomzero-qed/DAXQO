@@ -4,7 +4,8 @@ package io.daxqo.app.platform;
 public final class PlatformProfile {
     private static final String[] STANDARD_STORES = {
             "com.android.vending", "com.bbk.appstore", "com.heytap.market", "com.oppo.market",
-            "com.huawei.appmarket", "com.sec.android.app.samsungapps", "com.xiaomi.market", "com.vivo.appstore"
+            "com.huawei.appmarket", "com.sec.android.app.samsungapps", "com.xiaomi.market", "com.vivo.appstore",
+            "com.tencent.android.qqdownloader"
     };
     private static final String[] XM_STORES = {
             "com.xiaomi.market", "com.bbk.appstore", "com.vivo.appstore", "com.heytap.market",

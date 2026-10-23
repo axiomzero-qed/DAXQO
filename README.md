@@ -10,7 +10,7 @@ DAXQO 是单仓库双平台配置：Standard 为基准版本（基准提交 `837
 
 DAXQO 是面向手机的 Agent 工作台：Android 提供持续对话与成果界面，工具在手机已有的 Linux 环境执行，模型通过用户配置的 API 接入。项目采用 [MIT 许可证](LICENSE)；仓库地址为 [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO)。第三方依赖见[第三方说明](THIRD_PARTY_NOTICES.md)。
 
-当前源码正在开发 V0.4，入口见[V0.4 安装、权限与远程控制指南](docs/V0.4.md)。V0.4 增加手机端原生控制和邮件远程控制。GitHub 上现有的 [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) 仍是 V0.3 APK，并非 V0.4。要构建 V0.4，必须使用包含 V0.4 改动的当前源码：
+当前源码为 V0.4，包含手机端原生控制和邮件远程控制；安装与操作见[V0.4 指南](docs/V0.4.md)，STEPX Neo 真机回归结果见[V0.4 验收记录](docs/NEO-V04-ACCEPTANCE.md)。GitHub 上现有的 [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) 仍是 V0.3 APK，不包含 V0.4。构建 V0.4 请使用当前源码：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1
@@ -55,7 +55,7 @@ powershell -ExecutionPolicy Bypass -File .\android\build.ps1 -Xm -Lint
 
 V0.3 真机结果和未完成项目见[V0.3 验收记录](docs/V0.3-ACCEPTANCE.md)。此前已验证关闭 App、撤掉电脑调试通道后，手机仍能执行一次定时任务。Android App 管理已运行 Linux 环境中的 DAXQO 服务；不能创建、唤醒或保证厂商 Linux 容器持续运行，也不承诺 24 小时保活。
 
-## V0.4 当前开发 / Current V0.4 development
+## V0.4 当前源码 / Current V0.4 source
 
 V0.4 在现有手机 Linux 环境上增加原生手机控制及邮件远程控制入口。手机控制提供默认 `confirm` 和 `full` 模式；`full` 只允许 DAXQO 尝试 Android 已许可的操作，不会提升系统权限。`confirm` 下敏感写操作需一次性批准，可在 App 审批卡或可信邮箱确认，批准后原任务自动继续。网页仅显示模式，不切换模式；请在手机顶栏“手机控制”页设置。辅助功能默认关闭，远程邮件需单独配置邮箱和联系人。可信联系人拥有 Harness 权限，并非隔离沙箱。邮件审批和息屏续跑闭环已在真机通过，验收范围仅为 Settings App info 的 Back；其他设置、安装权限点击和支付未测试。设备限制见[V0.4 指南](docs/V0.4.md)。V0.4 当前源码可构建；V0.3 release 不是 V0.4 APK。
 
@@ -96,7 +96,7 @@ DAXQO is one repository with two platform configurations. Standard is the baseli
 
 DAXQO is a mobile Agent workspace. Its Android app provides persistent conversations and a results interface; tools run inside a Linux environment already available on the phone, and models are connected through an API configured by the user. The project uses the [MIT License](LICENSE); its repository is [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO). See [third-party notices](THIRD_PARTY_NOTICES.md) for external dependencies.
 
-The current source is developing V0.4; see the [V0.4 installation, permissions, and remote-control guide](docs/V0.4.md). V0.4 adds native phone control and email remote control. The existing [V0.3 GitHub release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) is still a V0.3 APK, not V0.4. To build V0.4, use the current source containing the V0.4 changes:
+The current source is V0.4, with native phone control and email remote control. See the [V0.4 guide](docs/V0.4.md) and [STEPX Neo device regression record](docs/NEO-V04-ACCEPTANCE.md). The existing [V0.3 GitHub release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) remains a V0.3 APK and does not include V0.4. Build V0.4 from the current source:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1

@@ -6,6 +6,7 @@ public final class PlatformProfileRegression {
         PlatformProfile xm = PlatformProfile.fromId("xm");
         check("xm".equals(xm.id) && "standard".equals(standard.id), "profile ids");
         check("com.android.vending".equals(standard.appStoreCandidates()[0]), "Standard store order is neutral");
+        check(java.util.Arrays.asList(standard.appStoreCandidates()).contains("com.tencent.android.qqdownloader"), "Standard includes verified Tencent app store");
         check("com.xiaomi.market".equals(xm.appStoreCandidates()[0]), "XM store is first");
         check(!standard.setupGuidance.contains("澎湃") && !standard.setupGuidance.contains("锁屏显示"), "standard has no XM guidance");
         check(xm.setupGuidance.contains("后台弹出界面") && xm.setupGuidance.contains("锁屏显示"), "XM permissions guidance");

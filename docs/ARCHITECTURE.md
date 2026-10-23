@@ -54,7 +54,7 @@ flowchart LR
 
 Termux/PRoot 脚本及 `--no-start` 实验分支已撤下，历史实验保留在 Git 和 [XM 历史记录](XM-ACCEPTANCE.md)。复用 Neo 的安装器与服务协议，不表示小米拥有相同厂商 Linux；缺少兼容 Linux 环境时，当前 XM 方案不能宣称完整可用。
 
-新模块同时进入 Linux 安装清单、更新包与运行桥白名单。旧运行桥若因旧白名单拒绝新模块，应先在空闲窗口按已有安装/维护流程升级运行桥，不放宽路径和哈希校验；维护前保留备份，不在任务运行时更新源码。此轮没有自动更改手机的环境、账户或权限。
+新模块同时进入 Linux 安装清单、更新包与运行桥白名单。旧运行桥若因旧白名单拒绝新模块，应先在空闲窗口按已有安装/维护流程升级运行桥，不放宽路径和哈希校验；维护前保留备份，不在任务运行时更新源码。Neo 本轮已按此流程更新 DAXQO 源码，保留原有 Linux 环境、模型配置、配对和历史任务，见[验收记录](NEO-V04-ACCEPTANCE.md)。
 
 ## 扩展方式与明确未实现项
 
@@ -62,16 +62,16 @@ Termux/PRoot 脚本及 `--no-start` 实验分支已撤下，历史实验保留�
 
 目录中的 `shizuku`、`oem` 标记为 `implemented=False`：仅占据扩展名称，没有 SDK、权限申请、系统服务绑定或动作实现。选择它们会在读取本地凭据、创建连接之前明确失败，不会静默退回其他能力。未来实现必须显式注册工厂、报告实际可用状态、遵守同样的授权和锁屏边界，并添加契约与真机测试；不能通过抽象接口绕过现有策略。
 
-当前无法从代码或历史实验确认 XM 上 Neo Linux 的可用性、新安装链路的端到端运行、安全密码锁屏、长时间息屏及所有澎湃 OS 版本。Standard 的历史真机验收仍见 [V0.4 指南](V0.4.md)；本轮的主机回归与构建不替代 Neo 真机复测。
+Standard 的 STEPX Neo PZ261A 真机回归已于 2026-10-23 完成，范围与限制见[验收记录](NEO-V04-ACCEPTANCE.md)。XM 上 Neo Linux 的可用性及新安装链路端到端运行仍未验证；安全密码锁屏、SIM 限制、长期息屏、电池行为、所有安装和支付流程及全部澎湃 OS 版本也未在本轮验收。
 
 ## 本轮检查（2026-10-23）
 
 - 共享后端 166 项测试通过，包含邮件/DKIM、调度、审批、运行桥、进程回收与新能力工厂；没有调用模型 API。
 - 共用 Linux 安装/配对 5 项测试通过，覆盖默认启动及健康检查、失败不误报 ready、配对数据保留及无效参数拒绝。
-- Standard 与 XM 均构建并检查 APK；平台参数、应用标识、scheme、快捷方式目标与平台资源须分别核对。
+- Standard 与 XM 均构建并检查 APK；已分别核对平台参数、应用标识、scheme、快捷方式目标与平台资源。
 - 原有 2000 次被动回调、298 项审批/唤醒断言与 64 次并发重试保留；新增平台配置回归与 10 项点击快照回归。
-- 原 Standard 工作区及分支未覆盖；变更在单独的 `codex/unified-platforms` 开发分支。
+- Neo 手机 Linux 同套 166 项测试通过；原生 11 项检查及息屏后模型自主计算闭环通过，见[验收记录](NEO-V04-ACCEPTANCE.md)。
 
 ## English
 
-One repository and source tree serve Standard and XM. Standard retains the STEPX Neo baseline, app identity, Linux installer, supervisor and loopback lifecycle contract. XM adds a build/profile configuration; it does not provide a vendor Linux image. Accessibility is the only implemented phone backend. Shizuku and OEM identifiers are unavailable extension points, explicitly rejected without fallback. Earlier Termux/PRoot experiments are historical evidence, not acceptance of the current XM Linux path. Host tests and APK builds do not establish fresh Neo or XM device acceptance.
+One repository and source tree serve Standard and XM. Standard retains the STEPX Neo baseline, app identity, Linux installer, supervisor and loopback lifecycle contract. XM adds a build/profile configuration; it does not provide a vendor Linux image. Accessibility is the only implemented phone backend. Shizuku and OEM identifiers are unavailable extension points, explicitly rejected without fallback. Earlier Termux/PRoot experiments are historical evidence, not acceptance of the current XM Linux path. Standard completed STEPX Neo PZ261A device regression on 2026-10-23; see the [acceptance record](NEO-V04-ACCEPTANCE.md). The current XM Linux path remains unverified on-device.
