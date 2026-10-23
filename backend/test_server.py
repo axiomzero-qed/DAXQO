@@ -1143,4 +1143,25 @@ class AndroidOwnerConsentTests(unittest.TestCase):
         self.assertEqual(self.h.store.row("owner")["status"], "waiting_approval")
 
 
+@unittest.skipUnless(sys.platform.startswith("linux"), "Linux process identity checks")
+class ProcDiscoveryTests(unittest.TestCase):
+    def test_kernel_without_task_children_uses_verified_uid_snapshot(self):
+        task = MagicMock()
+        task.joinpath.return_value.read_text.side_effect = FileNotFoundError()
+        task.exists.return_value = True  # Android kernel lacks the children file.
+        own = Mock(name="own")
+        own.name = "101"
+        own.stat.return_value.st_uid = 1000
+        other = Mock(name="other")
+        other.name = "102"
+        other.stat.return_value.st_uid = 2000
+        identities = {100: (100, 1000, 1, 10), 101: (101, 1000, 100, 11)}
+        with patch.object(server, "Path") as paths, patch.object(server.os, "scandir") as scan, \
+                patch.object(server, "_linux_process_identity", side_effect=identities.get) as identify:
+            paths.return_value.iterdir.return_value = [task]
+            scan.return_value.__enter__.return_value = iter([own, other])
+            self.assertEqual(server._linux_descendant_identities(100), [(101, 1000, 11)])
+            self.assertNotIn(unittest.mock.call(102), identify.call_args_list)
+
+
 if __name__ == "__main__": unittest.main()

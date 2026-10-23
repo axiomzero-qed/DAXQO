@@ -6,11 +6,17 @@ android {
     namespace 'io.daxqo.app'
     compileSdk 35
 
+    def xmBuild = project.hasProperty('xm') && property('xm') == 'true'
+
     defaultConfig {
-        applicationId 'io.daxqo.app'
+        applicationId xmBuild ? 'io.daxqo.xm' : 'io.daxqo.app'
         minSdk 26
         targetSdk 35
         versionCode 4
-        versionName '0.4.0'
+        versionName xmBuild ? '0.4.0-xm' : '0.4.0'
+        resValue 'string', 'app_name', xmBuild ? 'DAXQO for XM' : '达序 DAXQO'
+        resValue 'string', 'pairing_scheme', xmBuild ? 'daxqo-xm' : 'daxqo'
+        resValue 'string', 'shortcut_target_package', xmBuild ? 'io.daxqo.xm' : 'io.daxqo.app'
+        manifestPlaceholders = [pairingScheme: xmBuild ? 'daxqo-xm' : 'daxqo']
     }
 }

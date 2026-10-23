@@ -6,6 +6,8 @@
 
 ## 中文
 
+XM 小米/Termux 独立版本说明见 [DAXQO for XM](docs/XM.md)。
+
 DAXQO 是面向手机的 Agent 工作台：Android 提供持续对话与成果界面，工具在手机已有的 Linux 环境执行，模型通过用户配置的 API 接入。项目采用 [MIT 许可证](LICENSE)；仓库地址为 [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO)。第三方依赖见[第三方说明](THIRD_PARTY_NOTICES.md)。
 
 当前源码正在开发 V0.4，入口见[V0.4 安装、权限与远程控制指南](docs/V0.4.md)。V0.4 增加手机端原生控制和邮件远程控制。GitHub 上现有的 [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) 仍是 V0.3 APK，并非 V0.4。要构建 V0.4，必须使用包含 V0.4 改动的当前源码：
@@ -83,6 +85,8 @@ powershell -ExecutionPolicy Bypass -File .\android\build.ps1 -InstallTools
 ---
 
 ## English
+
+For the separate Xiaomi/Termux build, see [DAXQO for XM](docs/XM.md).
 
 DAXQO is a mobile Agent workspace. Its Android app provides persistent conversations and a results interface; tools run inside a Linux environment already available on the phone, and models are connected through an API configured by the user. The project uses the [MIT License](LICENSE); its repository is [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO). See [third-party notices](THIRD_PARTY_NOTICES.md) for external dependencies.
 

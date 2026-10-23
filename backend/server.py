@@ -124,8 +124,50 @@ def _linux_descendant_identities(root_pid: int) -> list[tuple[int, int, int]]:
     """Snapshot direct and detached descendants before their parents can exit."""
     root = _linux_process_identity(root_pid)
     if not root: return []
-    try: pids = [int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdigit()]
-    except OSError: return []
+    # Android has hundreds of unrelated /proc entries. Under PRoot a global
+    # scan can outlive a short parent, losing detached children at reparenting.
+    # Walk every worker thread's kernel child list instead, retaining the same
+    # UID/start-time checks used by the fallback and by the signalling path.
+    try:
+        result: list[tuple[int, int, int]] = []
+        seen = {root_pid}
+        stack = [root_pid]
+        while stack:
+            parent = stack.pop()
+            try:
+                tasks = list(Path(f"/proc/{parent}/task").iterdir())
+            except FileNotFoundError:
+                continue
+            for task in tasks:
+                try:
+                    child_pids = task.joinpath("children").read_text(encoding="ascii").split()
+                except FileNotFoundError:
+                    if task.exists():
+                        raise OSError("Kernel does not expose task children")
+                    continue
+                for value in child_pids:
+                    pid = int(value)
+                    if pid in seen: continue
+                    seen.add(pid)
+                    identity = _linux_process_identity(pid)
+                    if identity and identity[1] == root[1] and identity[2] == parent:
+                        result.append((pid, identity[1], identity[3]))
+                        stack.append(pid)
+        return result
+    except (OSError, ValueError):
+        pass  # Older kernels may not expose task/*/children.
+    pids = []
+    try:
+        with os.scandir("/proc") as entries:
+            for entry in entries:
+                if not entry.name.isdigit(): continue
+                try:
+                    if entry.stat(follow_symlinks=False).st_uid == root[1]:
+                        pids.append(int(entry.name))
+                except OSError:
+                    continue
+    except OSError:
+        return []
     children: dict[int, list[tuple[int, int, int, int]]] = {}
     for pid in pids:
         identity = _linux_process_identity(pid)
@@ -330,7 +372,7 @@ class AppServer:
                 for pid, uid, start_ticks in _linux_descendant_identities(process.pid):
                     with self._descendants_lock:
                         self._tracked_descendants[(pid, start_ticks)] = (pid, uid, start_ticks)
-            self._descendants_stop.wait(0.25)
+            self._descendants_stop.wait(0.1)
 
     def _write(self, msg: dict[str, Any]) -> None:
         if not self.process or not self.process.stdin or self.process.poll() is not None:

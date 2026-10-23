@@ -5,6 +5,6 @@
         android:shortcutShortLabel="@string/phone_control_shortcut"
         android:shortcutLongLabel="@string/phone_control_shortcut">
         <intent android:action="io.daxqo.app.CONTROL"
-            android:targetPackage="io.daxqo.app" android:targetClass="io.daxqo.app.MainActivity" />
+            android:targetPackage="@string/shortcut_target_package" android:targetClass="io.daxqo.app.MainActivity" />
     </shortcut>
 </shortcuts>

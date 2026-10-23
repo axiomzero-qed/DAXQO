@@ -114,7 +114,7 @@ public final class MainActivity extends Activity {
 
     private boolean consumePairIntent(Intent intent) {
         Uri uri = intent == null ? null : intent.getData();
-        if (uri == null || !"daxqo".equals(uri.getScheme()) || !"connect".equals(uri.getHost())) return false;
+        if (uri == null || !getString(R.string.pairing_scheme).equals(uri.getScheme()) || !"connect".equals(uri.getHost())) return false;
         String fragment = uri.getFragment();
         String cap = fragment != null && fragment.startsWith("token=") ? Uri.decode(fragment.substring(6)) : null;
         if (cap == null || cap.length() < 32 || cap.length() > 4096 || !cap.matches("[A-Za-z0-9._~-]+")) {
@@ -152,7 +152,7 @@ public final class MainActivity extends Activity {
         nativeActions.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
         nativeActions.setPadding(12, 0, 12, 0);
         TextView brand = new TextView(this);
-        brand.setText("达序 DAXQO");
+        brand.setText(R.string.app_name);
         brand.setTextSize(15);
         brand.setTextColor(Color.rgb(35, 48, 64));
         nativeActions.addView(brand, new LinearLayout.LayoutParams(0, -2, 1));
@@ -181,6 +181,20 @@ public final class MainActivity extends Activity {
         restart.setText("重启服务");
         restart.setOnClickListener(v -> callRuntime("restart"));
         actions.addView(restart);
+        if ("daxqo-xm".equals(getString(R.string.pairing_scheme))) {
+            Button openTermux = new Button(this);
+            openTermux.setText("打开 Termux");
+            openTermux.setOnClickListener(v -> {
+                Intent launch = getPackageManager().getLaunchIntentForPackage("com.termux");
+                if (launch == null) {
+                    status.setText("未安装 Termux；请安装官方 Termux 后重试");
+                    return;
+                }
+                status.setText("请在 Termux 执行 daxqo-xm start，并保持会话打开");
+                startActivity(launch);
+            });
+            actions.addView(openTermux);
+        }
         connectionPanel.addView(actions, new LinearLayout.LayoutParams(-1, -2));
         root.addView(connectionPanel, new LinearLayout.LayoutParams(-1, -2));
         webView = new WebView(this);
