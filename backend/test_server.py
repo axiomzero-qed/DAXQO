@@ -566,7 +566,10 @@ for line in sys.stdin:
         self.harness.sandbox = "danger-full-access"
         task = self.harness.start_task({"prompt": "complete a fixture task", "model": "fixture-model"})
         deadline = time.time() + 3
-        while time.time() < deadline and self.harness.store.row(task["id"])["status"] not in ("completed", "failed"):
+        while time.time() < deadline:
+            saved = self.harness.store.row(task["id"])
+            rejected = any(e.get("method") == "fixture/unsupported-rejected" for e in self.events)
+            if saved["status"] in ("completed", "failed") and saved["turn_id"] == "turn-1" and rejected: break
             time.sleep(0.02)
         saved = self.harness.store.row(task["id"])
         self.assertEqual(saved["status"], "completed", saved)
@@ -592,6 +595,15 @@ for line in sys.stdin:
         self.assertEqual(resumed_row["turn_id"], "turn-2")
         self.assertNotIn("stale answer", resumed_row["result"])
         self.assertTrue(any(e.get("method") == "fixture/sandbox" and e["params"] == {"method": "thread/resume", "sandbox": "danger-full-access"} for e in self.events))
+
+    def test_turn_completion_persists_id_when_it_arrives_before_start_response(self):
+        self.insert_running_task("completion-before-start-response")
+        self.harness.store.update("completion-before-start-response", turn_id=None)
+        self.harness._engine_event({"method": "turn/completed", "params": {
+            "threadId": "thread-terminal", "turn": {"id": "turn-terminal", "status": "completed"}}})
+        row = self.harness.store.row("completion-before-start-response")
+        self.assertEqual(row["status"], "completed")
+        self.assertEqual(row["turn_id"], "turn-terminal")
 
     def test_messages_steer_idempotently_and_queue_until_turn_id_exists(self):
         stamp = server.now()

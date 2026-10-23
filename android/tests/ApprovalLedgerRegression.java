@@ -139,6 +139,31 @@ public final class ApprovalLedgerRegression {
         code(focusedInput.decide(focusPending.entry.id, true, 101), "");
         code(focusedInput.check(focusedBefore, focusB, "input", "target.app", "输入文本", 102), "stale_approval");
 
+        Map<String, String> tapNodeFields = new HashMap<>();
+        tapNodeFields.put("nodeId", "\"0.1.2.3\"");
+        tapNodeFields.put("snapshotId", "\"snapshot-before\"");
+        tapNodeFields.put("expectedPackage", "\"com.xiaomi.market\"");
+        String tapNodeBefore = DeviceAccessibilityService.operationIdentity("tap_node", tapNodeFields, true);
+        String unvalidatedTapBefore = DeviceAccessibilityService.operationIdentity("tap_node", tapNodeFields, false);
+        tapNodeFields.put("snapshotId", "\"snapshot-after\"");
+        String tapNodeAfter = DeviceAccessibilityService.operationIdentity("tap_node", tapNodeFields, true);
+        check(tapNodeBefore.equals(tapNodeAfter), "validated tap_node may reuse approval across fresh snapshots");
+        check(!unvalidatedTapBefore.equals(DeviceAccessibilityService.operationIdentity("tap_node", tapNodeFields, false)),
+                "unvalidated tap_node identity must retain snapshotId");
+        ApprovalLedger tapNodeLedger = new ApprovalLedger();
+        ApprovalLedger.Result tapNodePending = tapNodeLedger.check(tapNodeBefore, "same-page", "tap_node",
+                "com.xiaomi.market", "点击选中的界面元素", 20);
+        ApprovalLedger.Result tapNodeRepeat = tapNodeLedger.check(tapNodeAfter, "same-page", "tap_node",
+                "com.xiaomi.market", "点击选中的界面元素", 21);
+        check(tapNodePending.entry.id.equals(tapNodeRepeat.entry.id), "snapshot change reuses same tap_node approval");
+        code(tapNodeLedger.decide(tapNodePending.entry.id, true, 22), "");
+        check(!tapNodeBefore.equals(DeviceAccessibilityService.operationIdentity("tap_node", new HashMap<String, String>() {{
+            put("nodeId", "\"0.1.2.4\""); put("snapshotId", "\"snapshot-after\"");
+            put("expectedPackage", "\"com.xiaomi.market\"");
+        }}, true)), "tap_node still binds nodeId");
+        check(!tapNodeBefore.equals(DeviceAccessibilityService.operationIdentity("tap", tapNodeFields, true)),
+                "tap_node identity differs from coordinate tap action");
+
         for (int i = 0; i < 100; i++) attempt(ledger, "operation-" + i, "page", 1000000 + i);
         check(ledger.list(1000100).size() == 16, "history must remain bounded");
         check(ledger.list(1000100).stream().filter(e -> "pending".equals(e.status) || "approved".equals(e.status)).count() == 1, "only one actionable grant");

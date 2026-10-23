@@ -22,7 +22,8 @@ MAX_RESPONSE = 5 * 1024 * 1024
 MAX_LINE = 1024 * 1024
 HTTP_TIMEOUT = 15.0
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-ACTION_NAMES = ("wake", "open_app", "tap", "swipe", "long_press", "input", "back", "home")
+ACTION_NAMES = ("wake", "open_app", "tap_node", "tap", "swipe", "long_press", "input", "back", "home")
+COMPACT_TREE_LIMIT = 4800
 SENSITIVE_KEY = re.compile(r"(?i)(?:capability|authorization|access[_-]?token|refresh[_-]?token|api[_-]?key|secret|password|credential)")
 
 
@@ -55,7 +56,7 @@ def _public_value(value: Any, *, key: str = "") -> Any:
     return str(value)[:1000]
 
 
-def _safe_tree(value: Any) -> dict[str, Any]:
+def _safe_tree(value: Any, compact: bool = True) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise BridgeError("invalid_response", "Android bridge returned an invalid accessibility tree")
     result = _public_value(value)
@@ -72,10 +73,37 @@ def _safe_tree(value: Any) -> dict[str, Any]:
         if safe_node.get("password") is True:
             safe_node["text"] = ""
             safe_node["description"] = ""
-        safe_nodes.append(safe_node)
+        if not compact:
+            safe_nodes.append(safe_node)
+            continue
+        bounds = safe_node.get("bounds")
+        width, height = result.get("width"), result.get("height")
+        if safe_node.get("visible") is False or not isinstance(bounds, list) or len(bounds) != 4 or \
+                not isinstance(width, (int, float)) or not isinstance(height, (int, float)):
+            continue
+        try: left, top, right, bottom = (float(v) for v in bounds)
+        except (TypeError, ValueError): continue
+        if right <= 0 or bottom <= 0 or left >= width or top >= height or right <= left or bottom <= top:
+            continue
+        label_key = "text" if safe_node.get("text") else "description" if safe_node.get("description") else None
+        if not label_key and not any(safe_node.get(flag) is True for flag in ("clickable", "editable", "scrollable")):
+            continue
+        compact_node = {"id": safe_node.get("id"), "parentId": safe_node.get("parentId"),
+                        label_key: safe_node[label_key] if label_key else None,
+                        "bounds": bounds}
+        if not label_key: compact_node.pop(None, None)
+        for flag in ("clickable", "editable", "scrollable"):
+            if safe_node.get(flag) is True: compact_node[flag] = True
+        safe_nodes.append(compact_node)
     result["nodes"] = safe_nodes
     if len(nodes) > len(safe_nodes):
         result["truncated"] = True
+    if compact:
+        original = result.get("truncated") is True
+        result["truncated"] = original
+        while safe_nodes and len(json.dumps(result, ensure_ascii=False, separators=(",", ":"))) > COMPACT_TREE_LIMIT:
+            safe_nodes.pop()
+            result["truncated"] = True
     return result
 
 
@@ -192,13 +220,14 @@ TOOL_DEFINITIONS = [
     {"name": "android_status", "description": "Read Android DAXQO accessibility/control readiness. Does not change device state.",
      "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
-    {"name": "android_observe", "description": "Read the current accessibility tree and optionally capture a screenshot. Password-field text is removed. Does not change device state.",
+    {"name": "android_observe", "description": "Read the current accessibility tree and optionally capture a screenshot. Tree output is compact by default; set compact=false for the full tree. Password-field text is removed. Does not change device state.",
      "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
      "inputSchema": {"type": "object", "properties": {
          "includeTree": {"type": "boolean", "default": True},
          "includeScreenshot": {"type": "boolean", "default": False},
+         "compact": {"type": "boolean", "default": True},
          "expectedPackage": {"type": "string", "maxLength": 255}}, "additionalProperties": False}},
-    {"name": "android_action", "description": "Perform one bounded Android action under the owner's phone policy. Arguments: open_app requires args.packageName (Android package name); tap requires args.x and args.y screen coordinates; input requires args.text. Full mode executes without an extra DAXQO consent gate. Confirm mode returns approval_required plus an approval ID for sensitive writes; report waiting for owner confirmation and end the turn, without asking the owner to operate the phone. Owner GUI or authenticated email handles consent and automatically resumes this task. Never approve yourself or change policy through other tools. Wake can dismiss a known non-secure swipe lock through Android's official API; verify actual state. Report actual system failures accurately; no secure-keyguard or protected-window bypass.",
+    {"name": "android_action", "description": "Perform one bounded Android action under the owner's phone policy. Prefer tap_node with args.nodeId and args.snapshotId from the latest observed tree; it clicks that accessibility node. tap requires args.x and args.y as original screen pixel coordinates, never coordinates from a displayed or resized screenshot. open_app requires args.packageName; input requires args.text. Full mode executes without an extra DAXQO consent gate. Confirm mode returns approval_required plus an approval ID for sensitive writes; report waiting for owner confirmation and end the turn, without asking the owner to operate the phone. Owner GUI or authenticated email handles consent and automatically resumes this task. Never approve yourself or change policy through other tools. Wake can dismiss a known non-secure swipe lock through Android's official API; verify actual state. Report actual system failures accurately; no secure-keyguard or protected-window bypass.",
      "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
      "inputSchema": {"type": "object", "properties": {
          "action": {"type": "string", "enum": list(ACTION_NAMES)},
@@ -222,7 +251,14 @@ def _validate_action_args(action: str, args: Any, expected_package: Any) -> dict
         value = result.get(name)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 100000:
             raise BridgeError("invalid_args", f"{name} must be a screen coordinate")
-    if action in ("tap", "long_press"):
+    if action == "tap_node":
+        node_id, snapshot_id = result.get("nodeId"), result.get("snapshotId")
+        if not isinstance(node_id, str) or not node_id or len(node_id) > 255 or \
+                not isinstance(snapshot_id, str) or not snapshot_id or len(snapshot_id) > 255:
+            raise BridgeError("invalid_args", "tap_node requires non-empty nodeId and snapshotId")
+        if any(key in result for key in ("x", "y", "x1", "y1", "x2", "y2")):
+            raise BridgeError("invalid_args", "tap_node uses nodeId/snapshotId, not coordinates")
+    elif action in ("tap", "long_press"):
         number("x"); number("y")
     elif action == "swipe":
         for name in ("x1", "y1", "x2", "y2"): number(name)
@@ -262,8 +298,10 @@ class AndroidMCP:
         if name == "android_observe":
             include_tree = args.get("includeTree", True)
             include_screenshot = args.get("includeScreenshot", False)
+            compact = args.get("compact", True)
             if not isinstance(include_tree, bool) or not isinstance(include_screenshot, bool):
                 raise BridgeError("invalid_args", "includeTree/includeScreenshot must be booleans")
+            if not isinstance(compact, bool): raise BridgeError("invalid_args", "compact must be a boolean")
             if not include_tree and not include_screenshot:
                 raise BridgeError("invalid_args", "Request a tree, screenshot, or both")
             expected = args.get("expectedPackage")
@@ -272,7 +310,7 @@ class AndroidMCP:
             content: list[dict[str, Any]] = []
             if include_tree:
                 tree = self.bridge.execute("tree", {**({"expectedPackage": expected} if expected else {})})
-                content.append(self._text({"tree": _safe_tree(tree)}))
+                content.append(self._text({"tree": _safe_tree(tree, compact=compact)}))
             if include_screenshot:
                 result = self.bridge.execute("screenshot", {**({"expectedPackage": expected} if expected else {})})
                 image = result.get("image") if isinstance(result, dict) else None

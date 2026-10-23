@@ -45,6 +45,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
     private DeviceHttpBridge bridge;
     private String snapshotId = "";
     private String snapshotPackage = "";
+    private NodeSnapshot nodeSnapshot;
     private long snapshotSequence;
     volatile String lastAction = "";
     volatile String lastError = "";
@@ -197,6 +198,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
             case "tree": callback.done(success(id, tree())); return;
             case "screenshot": screenshot(id, callback); return;
             case "tap": case "long_press": case "swipe": gesture(id, action, args, callback); return;
+            case "tap_node": tapNode(id, args, callback); return;
             case "input": input(id, args, callback); return;
             case "back": case "home":
                 boolean performed = performGlobalAction("back".equals(action) ? GLOBAL_ACTION_BACK : GLOBAL_ACTION_HOME);
@@ -303,7 +305,8 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         while (names.hasNext()) { String key = names.next(); fields.put(key, canonical(args.get(key))); }
         // Input reaches this method only after its current snapshot/node has
         // been validated. The snapshot is an observation handle, not consent.
-        String operation = digest(operationIdentity(action, fields, "input".equals(action) && !args.optString("nodeId", "").isEmpty()));
+        String operation = digest(operationIdentity(action, fields,
+                ("input".equals(action) || "tap_node".equals(action)) && !args.optString("nodeId", "").isEmpty()));
         synchronized (DeviceState.approvals) {
             ApprovalLedger.Result result = DeviceState.approvals.check(operation, page, action, foregroundPackage(),
                     actionSummary(action) + "：" + reason + approvalContext(), android.os.SystemClock.elapsedRealtime());
@@ -318,6 +321,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         switch (action) {
             case "input": return "输入文本";
             case "tap": return "点击";
+            case "tap_node": return "点击选中的界面元素";
             case "swipe": return "滑动";
             case "long_press": return "长按";
             case "open_app": return "打开应用";
@@ -336,7 +340,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         Collections.sort(keys);
         StringBuilder identity = new StringBuilder(action).append('\n');
         for (String key : keys) {
-            if ("input".equals(action) && validatedNodeInput && "snapshotId".equals(key)) continue;
+            if (("input".equals(action) || "tap_node".equals(action)) && validatedNodeInput && "snapshotId".equals(key)) continue;
             String field = canonicalFields.get(key);
             identity.append(key.length()).append(':').append(key).append(field.length()).append(':').append(field);
         }
@@ -496,6 +500,93 @@ public final class DeviceAccessibilityService extends AccessibilityService {
             callback.done(ok ? success(id, new JSONObject().put("performed", true)) : failure(id, "action_failed", "应用未接受文本输入"));
         } finally { if (node != null) node.recycle(); root.recycle(); }
     }
+    private NodeSnapshot captureNodes(String ident, String packageName, JSONArray nodes) {
+        ArrayList<NodeSnapshot.Node> items = new ArrayList<>();
+        for (int i = 0; i < nodes.length(); i++) {
+            JSONObject n = nodes.optJSONObject(i);
+            if (n == null) continue;
+            JSONArray b = n.optJSONArray("bounds");
+            if (b == null || b.length() != 4) continue;
+            items.add(new NodeSnapshot.Node(n.optString("id"), n.optString("text"), n.optString("description"),
+                    n.optString("viewId"), n.optString("className"), b.optInt(0), b.optInt(1), b.optInt(2), b.optInt(3),
+                    n.optBoolean("visible"), n.optBoolean("enabled"), n.optBoolean("password")));
+        }
+        return new NodeSnapshot(ident, packageName, items);
+    }
+    private NodeSnapshot.Node verifiedTarget(AccessibilityNodeInfo node, String nodeId, String observed,
+                                            String actual, int[] size) throws Exception {
+        AccessibilityNodeInfo anchor = AccessibilityNodeInfo.obtain(node);
+        String path = nodeId;
+        try {
+            for (int level = 0; level < 2 && path.contains("."); level++) {
+                AccessibilityNodeInfo parent = anchor.getParent();
+                if (parent == null) return null;
+                anchor.recycle(); anchor = parent;
+                path = path.substring(0, path.lastIndexOf('.'));
+            }
+            JSONArray fresh = new JSONArray();
+            appendNode(anchor, path, "", fresh, 0, new boolean[] {false});
+            return nodeSnapshot.match(observed, nodeId, captureNodes("", actual, fresh), size[0], size[1]);
+        } finally { anchor.recycle(); }
+    }
+    private void tapNode(String id, JSONObject args, Completion callback) throws Exception {
+        String nodeId = args.optString("nodeId", ""), observed = args.optString("snapshotId", "");
+        if (nodeId.isEmpty() || observed.isEmpty() || nodeId.length() > 255 || observed.length() > 255
+                || args.has("x") || args.has("y") || args.has("x1") || args.has("y1") || args.has("x2") || args.has("y2")) {
+            callback.done(failure(id, "invalid_args", "元素点击需要nodeId和snapshotId，不接受坐标")); return;
+        }
+        if (nodeSnapshot == null || !snapshotId.equals(observed)) {
+            callback.done(failure(id, "stale_snapshot", "界面快照已失效，请重新读取后选择元素")); return;
+        }
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo targetNode = null, click = null;
+        if (root == null) { callback.done(failure(id, "no_window", "当前应用没有可用界面")); return; }
+        try {
+            String actual = value(root.getPackageName(), 200);
+            int[] size = screenSize();
+            targetNode = nodeAt(root, nodeId);
+            NodeSnapshot.Node target = targetNode == null ? null : verifiedTarget(targetNode, nodeId, observed, actual, size);
+            if (target == null) {
+                callback.done(failure(id, "stale_snapshot", "目标内容或所在列表已变化，请重新读取界面；未点击")); return;
+            }
+            JSONObject blocked = authorizeMutation(id, "tap_node", args, sensitiveReason());
+            if (blocked != null) { callback.done(blocked); return; }
+            // Consent checks can query another window. Recheck this same live
+            // widget and its row before either dispatch method; never resolve a
+            // reused child path and silently accept its new occupant.
+            target = verifiedTarget(targetNode, nodeId, observed, foregroundPackage(), size);
+            if (target == null) {
+                callback.done(failure(id, "stale_snapshot", "目标在检查期间已变化，请重新读取界面；未点击")); return;
+            }
+            double x = (Math.max(0, target.left) + Math.min(size[0], target.right)) / 2.0;
+            double y = (Math.max(0, target.top) + Math.min(size[1], target.bottom)) / 2.0;
+            click = AccessibilityNodeInfo.obtain(targetNode);
+            for (int level = 0; click != null && level < 3; level++) {
+                if (click.isClickable() && click.isVisibleToUser() && click.isEnabled()) {
+                    if (click.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                        nodeSnapshot = null; snapshotId = ""; snapshotPackage = "";
+                        callback.done(success(id, new JSONObject().put("nodeId", nodeId).put("snapshotId", observed)
+                                .put("method", "accessibility").put("x", x).put("y", y)));
+                    } else callback.done(failure(id, "action_failed", "应用未接受元素点击，请重新读取界面"));
+                    return;
+                }
+                AccessibilityNodeInfo parent = click.getParent();
+                click.recycle(); click = parent;
+            }
+            gesture(id, "tap", new JSONObject().put("x", x).put("y", y), response -> {
+                if (response.optBoolean("ok")) {
+                    try { response.getJSONObject("result").put("nodeId", nodeId).put("snapshotId", observed)
+                            .put("method", "verified_bounds").put("x", x).put("y", y); } catch (Exception ignored) { }
+                    nodeSnapshot = null; snapshotId = ""; snapshotPackage = "";
+                }
+                callback.done(response);
+            });
+        } finally {
+            if (click != null) click.recycle();
+            if (targetNode != null) targetNode.recycle();
+            root.recycle();
+        }
+    }
     private AccessibilityNodeInfo nodeAt(AccessibilityNodeInfo root, String path) {
         if (!path.matches("0(\\.[0-9]{1,3}){0,30}")) return null;
         AccessibilityNodeInfo node = AccessibilityNodeInfo.obtain(root);
@@ -517,6 +608,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         snapshotId = Long.toString(++snapshotSequence) + "-" + android.os.SystemClock.elapsedRealtime();
         snapshotPackage = root == null ? "" : value(root.getPackageName(), 200);
         if (root != null) { try { appendNode(root, "0", "", nodes, 0, truncated); } finally { root.recycle(); } }
+        nodeSnapshot = captureNodes(snapshotId, snapshotPackage, nodes);
         return new JSONObject().put("snapshotId", snapshotId).put("packageName", snapshotPackage).put("width", size[0]).put("height", size[1]).put("nodes", nodes).put("truncated", truncated[0]);
     }
     private void appendNode(AccessibilityNodeInfo node, String path, String parent, JSONArray nodes, int depth, boolean[] truncated) throws Exception {

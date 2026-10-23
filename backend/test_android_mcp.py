@@ -48,10 +48,10 @@ class BridgeFixture(BaseHTTPRequestHandler):
         self.server.actions.append(request)
         action = request.get("action")
         if action == "tree":
-            result = {"snapshotId": "snap-1", "packageName": "example.app", "width": 100, "height": 200,
+            result = getattr(self.server, "tree_result", None) or {"snapshotId": "snap-1", "packageName": "example.app", "width": 100, "height": 200,
                       "truncated": False, "nodes": [
-                          {"id": "0", "text": "visible label", "password": False},
-                          {"id": "1", "text": "hidden password", "description": "secret description", "password": True}]}
+                          {"id": "0", "parentId": "", "text": "visible label", "bounds": [0,0,100,40], "visible": True, "password": False},
+                          {"id": "1", "parentId": "0", "text": "hidden password", "description": "secret description", "bounds": [0,40,100,80], "visible": True, "password": True}]}
             return self._send(200, {"id": request["id"], "ok": True, "result": result})
         if action == "screenshot":
             image = base64.b64encode(getattr(self.server, "screenshot_data", b"\x89PNG\r\n\x1a\nfixture-png")).decode("ascii")
@@ -149,6 +149,46 @@ class AndroidMCPTests(unittest.TestCase):
         self.assertTrue(base64.b64decode(image["data"]).startswith(mcp.PNG_SIGNATURE))
         self.assertEqual([item["action"] for item in self.http.actions], ["tree", "screenshot"])
 
+    def test_default_compact_tree_preserves_early_visible_target_as_valid_bounded_json(self):
+        nodes = [{"id": "0", "parentId": "", "text": "Root", "bounds": [0,0,1080,2400], "visible": True}]
+        nodes.append({"id": "0.1", "parentId": "0", "text": "途虎养车", "bounds": [20,1157,1060,1225],
+                      "visible": True, "clickable": True})
+        nodes.extend({"id": f"0.2.{i}", "parentId": "0.2", "text": "后续节点" + str(i) + "x" * 180,
+                      "bounds": [0, i * 10, 1080, i * 10 + 8], "visible": True} for i in range(120))
+        self.http.tree_result = {"snapshotId": "snap-tu-hu", "packageName": "com.xiaomi.market",
+                                 "width": 1080, "height": 2400, "truncated": False, "nodes": nodes}
+        response = self.server.call_tool("android_observe", {})
+        compact_text = response["content"][0]["text"]
+        compact = json.loads(compact_text)["tree"]
+        self.assertLessEqual(len(compact_text), mcp.COMPACT_TREE_LIMIT + 100)
+        self.assertEqual(compact["snapshotId"], "snap-tu-hu")
+        target = next(node for node in compact["nodes"] if node["id"] == "0.1")
+        self.assertEqual(target["parentId"], "0")
+        self.assertEqual(target["text"], "途虎养车")
+        self.assertTrue(target["clickable"])
+        self.assertTrue(compact["truncated"])
+
+    def test_raw_tree_remains_available_when_compact_false(self):
+        self.http.tree_result = {"snapshotId": "snap-raw", "packageName": "example.app", "width": 10, "height": 10,
+            "truncated": False, "nodes": [{"id": "0", "parentId": "", "text": "Raw", "viewId": "pkg:id/title",
+            "bounds": [0,0,10,10], "visible": True, "enabled": True}]}
+        response = self.server.call_tool("android_observe", {"compact": False})
+        tree = json.loads(response["content"][0]["text"])["tree"]
+        self.assertEqual(tree["nodes"][0]["viewId"], "pkg:id/title")
+        self.assertEqual(tree["nodes"][0]["enabled"], True)
+
+    def test_tap_node_requires_snapshot_identity_and_never_falls_back_to_coordinates(self):
+        result = self.server.call_tool("android_action", {"action": "tap_node", "args": {
+            "nodeId": "0.1", "snapshotId": "snap-1"}})
+        self.assertIn('"accepted":true', result["content"][0]["text"])
+        self.assertEqual(self.http.actions[-1], {"id": self.http.actions[-1]["id"], "action": "tap_node",
+            "args": {"nodeId": "0.1", "snapshotId": "snap-1"}})
+        before = len(self.http.actions)
+        for args in ({"nodeId": "0.1", "snapshotId": "snap-1", "x": 20, "y": 30},
+                     {"nodeId": "0.1"}, {"snapshotId": "snap-1"}):
+            with self.assertRaises(mcp.BridgeError): self.server.call_tool("android_action", {"action": "tap_node", "args": args})
+        self.assertEqual(len(self.http.actions), before)
+
     def test_large_screenshot_survives_real_bridge_request_without_base64_truncation(self):
         expected = mcp.PNG_SIGNATURE + bytes(range(256)) * 100
         self.assertGreater(len(base64.b64encode(expected)), 20000)
@@ -207,11 +247,13 @@ class AndroidMCPTests(unittest.TestCase):
         self.assertTrue(actions["annotations"]["openWorldHint"])
         self.assertFalse(actions["annotations"]["idempotentHint"])
         allowed = set(actions["inputSchema"]["properties"]["action"]["enum"])
-        self.assertEqual(allowed, {"wake", "open_app", "tap", "swipe", "long_press", "input", "back", "home"})
+        self.assertEqual(allowed, {"wake", "open_app", "tap_node", "tap", "swipe", "long_press", "input", "back", "home"})
         self.assertTrue(allowed.isdisjoint({"resume", "unlock", "grant_permission", "approve_payment"}))
         description = actions["description"]
         for required in ("open_app requires args.packageName", "tap requires args.x and args.y", "input requires args.text"):
             self.assertIn(required, description)
+        self.assertIn("Prefer tap_node", description)
+        self.assertIn("original screen pixel coordinates", description)
 
     def test_capability_symlink_is_rejected(self):
         linked_state = Path(self.temp.name) / "linked-state"
