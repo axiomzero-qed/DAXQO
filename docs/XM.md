@@ -50,13 +50,13 @@ DAXQO for XM 在 Termux 的私有 HOME 中运行独立的 Debian PRoot 容器 `d
 
 - 已安装并配对独立 XM APK（`io.daxqo.xm`）、官方 Termux 0.118.3、PRoot-Distro 5.10.2、Debian trixie、Python 3.13 venv、Node 20 / npm、Codex 0.163.0、dkimpy / dnspython、证书、Git / ripgrep 与 DNS。
 - 环境自检 15 项通过；手机本机 backend、运行桥和 Codex App Server 连接正常，WebView 显示“已连接”；强制停止并冷启动 XM 后仍能连接。已为本机 Termux 配置省电策略“无限制”。
-- 息屏 30 秒后，本机 backend、进程归属和 Codex 连接仍正常；从手机 Debian 访问 DeepSeek HTTPS 返回预期的未认证 HTTP 401。该检查未发送模型任务，也不等于长时间保活验收。
+- 首轮曾检查 30 秒后的本机连接及 DeepSeek HTTPS，但用户随后确认期间曾亲自解锁。因此撤回其“连续锁屏/息屏通过”的结论，只保留当时连接可用的事实。
 - 原有 153 项后端测试在手机上全部通过，另新增 1 项 Android 内核无 `task/*/children` 时的进程发现回归通过。修复前曾复现 detached 子进程回收失败；修复保留 UID、PID 启动时间和发信号前身份验证。
 - XM 构建与 Lint 通过；Android passive callbacks 2000 次、审批/唤醒 292 断言与 64 并发重试通过。WSL 原有 153 项为 137 passed、16 skipped，新增内核兼容回归与 3 项安装/配对测试通过。
-- 尚未填写模型 API key；真实模型任务、手机控制授权、邮件账户闭环与长时间息屏任务尚未验收。
+- 后续用户已配置模型 API key 并启用完整手机控制授权。DeepSeek Flash API、真实 Python 工具执行、无密码息屏定时任务和原生自动唤醒均已通过；文件随机标识、SHA-256、ARM64 架构及系统锁屏状态已独立核对。用户已删除密码，因此不能作为密码锁屏结果。时间与证据见[2026-10-23 真机复测](XM-ACCEPTANCE.md)。邮件账户闭环与长时间息屏任务尚未验收。
 
 ## English
 
 DAXQO for XM runs in a separate Debian PRoot container named `daxqo-xm`, with its checkout and app data kept under Termux's private HOME. It needs no root access. See the steps above for installation, pairing, and startup. Build the Android app with `android/build.ps1 -Xm -Lint`; the XM package is `io.daxqo.xm` and its pairing scheme is `daxqo-xm`.
 
-Keep the Termux foreground session running after `daxqo-xm start`. On the tested HyperOS device, set Termux's battery policy to Unrestricted so its HTTP service remains available while DAXQO is visible. The app does not grant restricted settings or accessibility permissions for you. Do not run the original DAXQO Linux service alongside XM because they share local ports. Installation, pairing, local Codex initialization, cold app launch, a 30-second screen-off connectivity check and device unit tests passed. A model API key is still required; actual model tasks and long screen-off runs remain unverified.
+Keep the Termux foreground session running after `daxqo-xm start`. On the tested HyperOS device, set Termux's battery policy to Unrestricted so its HTTP service remains available while DAXQO is visible. The app does not grant restricted settings or accessibility permissions for you. Do not run the original DAXQO Linux service alongside XM because they share local ports. Installation, pairing, local Codex initialization, cold app launch and device unit tests passed. The first 30-second lock test was invalidated by the user's manual unlock. The user subsequently configured an API key and removed the lock credential. API verification, a real Python/file task, a scheduled task while screen-off/locked and native wake/dismiss of a non-secure swipe lock passed. See the [device retest](XM-ACCEPTANCE.md). Secure credential locks and long screen-off runs remain unverified.
