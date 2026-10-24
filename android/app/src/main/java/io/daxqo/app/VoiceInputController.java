@@ -2,20 +2,28 @@ package io.daxqo.app;
 
 import android.Manifest;
 import android.content.Context;
+import android.content.ComponentName;
 import android.content.Intent;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
+import android.speech.RecognitionService;
 import android.speech.SpeechRecognizer;
+import android.provider.Settings;
 
 import java.util.ArrayList;
+import java.util.List;
 
 /** One-shot speech-to-text helper. All public methods must be called on the main thread. */
 public final class VoiceInputController {
+    private static final String RECOGNITION_SETTING = "voice_recognition_service";
     private static final long MAX_SESSION_MS = 45_000L;
     public enum Availability { ON_DEVICE, SYSTEM_SERVICE, NO_SERVICE }
 
@@ -49,8 +57,7 @@ public final class VoiceInputController {
                     && SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
                 return Availability.ON_DEVICE;
             }
-            return SpeechRecognizer.isRecognitionAvailable(context)
-                    ? Availability.SYSTEM_SERVICE : Availability.NO_SERVICE;
+            return recognitionService(context) != null ? Availability.SYSTEM_SERVICE : Availability.NO_SERVICE;
         } catch (RuntimeException e) {
             return Availability.NO_SERVICE;
         }
@@ -58,6 +65,38 @@ public final class VoiceInputController {
 
     public static boolean requiresSystemRecognition(Context context) {
         return getAvailability(context) == Availability.SYSTEM_SERVICE;
+    }
+
+    /** Some OEMs ship a recognizer but leave VOICE_RECOGNITION_SERVICE unset. */
+    private static ServiceInfo recognitionService(Context context) {
+        List<ResolveInfo> choices = context.getPackageManager().queryIntentServices(
+                new Intent(RecognitionService.SERVICE_INTERFACE), 0);
+        String selected = Settings.Secure.getString(context.getContentResolver(),
+                RECOGNITION_SETTING);
+        ServiceInfo best = null;
+        for (ResolveInfo choice : choices) {
+            ServiceInfo service = choice.serviceInfo;
+            if (service == null || !service.enabled || !service.exported
+                    || service.applicationInfo == null || !service.applicationInfo.enabled) continue;
+            // Legacy OEM services may have no bind permission. Modern services
+            // use the system broker's BIND_VOICE_INTERACTION permission.
+            if (service.permission != null && !service.permission.isEmpty()
+                    && !Manifest.permission.BIND_VOICE_INTERACTION.equals(service.permission)) continue;
+            String component = new ComponentName(service.packageName, service.name).flattenToString();
+            if (component.equals(selected) || new ComponentName(service.packageName, service.name).flattenToShortString().equals(selected)) return service;
+            boolean system = (service.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+            boolean bestSystem = best != null && (best.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+            if (best == null || (system && !bestSystem)
+                    || (system == bestSystem && component.compareTo(new ComponentName(best.packageName, best.name).flattenToString()) < 0)) best = service;
+        }
+        return best;
+    }
+
+    public static String systemServiceLabel(Context context) {
+        try {
+            ServiceInfo service = recognitionService(context);
+            return service == null ? "系统服务" : service.loadLabel(context.getPackageManager()).toString();
+        } catch (RuntimeException ignored) { return "系统服务"; }
     }
 
     public boolean isListening() { return active; }
@@ -86,7 +125,10 @@ public final class VoiceInputController {
             if (Build.VERSION.SDK_INT >= 31 && availability == Availability.ON_DEVICE) {
                 recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext);
             } else {
-                recognizer = SpeechRecognizer.createSpeechRecognizer(appContext);
+                ServiceInfo service = recognitionService(appContext);
+                if (service == null) { finishError(currentSession, "此设备没有可用的语音识别服务"); return; }
+                recognizer = SpeechRecognizer.createSpeechRecognizer(appContext,
+                        new ComponentName(service.packageName, service.name));
             }
             recognizer.setRecognitionListener(new Listener(currentSession));
             Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
@@ -179,7 +221,11 @@ public final class VoiceInputController {
             if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
                 finishError(expected, "没有识别到语音，请重试");
             } else if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
-                finishError(expected, "请先授予麦克风权限");
+                boolean appHasMicPermission = appContext.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                        == PackageManager.PERMISSION_GRANTED;
+                finishError(expected, appHasMicPermission
+                        ? "系统语音识别服务报告权限不足；达氙已获麦克风权限，请检查系统麦克风开关或更换识别服务。"
+                        : "请先授予达氙麦克风权限后重试");
             } else if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED
                     || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE) {
                 finishError(expected, "中文语音资源暂不可用，请检查系统语音识别设置");

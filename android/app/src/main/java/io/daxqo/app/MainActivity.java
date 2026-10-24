@@ -409,7 +409,7 @@ public final class MainActivity extends Activity {
         }
         if (availability == VoiceInputController.Availability.SYSTEM_SERVICE) {
             if (!shownSystemRecognitionNotice) {
-                Toast.makeText(this, "使用系统语音识别，可能联网", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "语音识别：" + VoiceInputController.systemServiceLabel(this) + "（可能联网）", Toast.LENGTH_LONG).show();
                 shownSystemRecognitionNotice = true;
             }
         } else {
@@ -568,8 +568,10 @@ public final class MainActivity extends Activity {
 
                 String filename = safeFilename(relativePath, connection.getHeaderField("Content-Disposition"));
                 String mime = connection.getContentType();
-                if (mime == null || mime.contains(";")) mime = MimeTypeMap.getSingleton()
-                        .getMimeTypeFromExtension(MimeTypeMap.getFileExtensionFromUrl(filename));
+                if (mime == null || mime.contains(";") || "application/octet-stream".equalsIgnoreCase(mime.trim())) {
+                    mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                            MimeTypeMap.getFileExtensionFromUrl(filename).toLowerCase(java.util.Locale.ROOT));
+                }
                 if (mime == null) mime = "application/octet-stream";
 
                 OutputStream output;

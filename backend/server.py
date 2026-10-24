@@ -1608,7 +1608,7 @@ class Harness:
         if e and e.account_error: account["error"] = e.account_error
         active_rows = self.store.active_rows()
         active = next((r for r in active_rows if r["id"] == self.active_task_id), active_rows[0] if active_rows else None)
-        return {"app": {"name": "DAXQO", "version": "0.6.0"}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
+        return {"app": {"name": "DAXQO", "version": "0.6.1"}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
                 "engine": {"installed": bool(self.engine_path or self.engine), "version": e.version if e else None, "connected": bool(e and e.connected)},
                 "account": account, "activeTaskId": active["id"] if active else None, "activeTaskIds": [r["id"] for r in active_rows],
                 "workspace": str(self.workspace),

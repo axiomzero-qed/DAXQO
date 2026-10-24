@@ -26,7 +26,7 @@ from urllib.request import (HTTPRedirectHandler, ProxyHandler, Request,
                             build_opener)
 
 VERSION = "0.163.0"
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.6.1"
 REGISTRY = "registry.npmjs.org"
 BACKEND_PORT = 18880
 FLAT_FILES = (
