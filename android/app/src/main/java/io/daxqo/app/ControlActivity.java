@@ -53,13 +53,13 @@ public final class ControlActivity extends Activity {
         scroll.addView(root);
         TextView title = text("手机控制", 25, Color.rgb(22, 35, 50));
         root.addView(title);
-        root.addView(text("让达序在本机任务中查看和操作手机。你可以随时暂停。", 15, Color.rgb(80, 90, 105)));
+        root.addView(text("让达氙在本机任务中查看和操作手机。你可以随时暂停。", 15, Color.rgb(80, 90, 105)));
         status = text("正在检查…", 15, Color.rgb(37, 99, 235));
         status.setPadding(0, dp(20), 0, dp(10));
         root.addView(status);
         toggle = button(root, "开始手机控制", v -> {
             if (DeviceAccessibilityService.current == null) {
-                Toast.makeText(this, "请先在系统设置中启用达序手机控制", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "请先在系统设置中启用达氙手机控制", Toast.LENGTH_LONG).show();
                 openSettings(Settings.ACTION_ACCESSIBILITY_SETTINGS);
             } else if (DeviceState.enabled(this)) DeviceState.setEnabled(this, false);
             else DeviceState.setEnabled(this, true);
@@ -67,11 +67,11 @@ public final class ControlActivity extends Activity {
         });
         policy = text("", 15, Color.rgb(37, 99, 235));
         root.addView(policy);
-        root.addView(text("逐项确认：读取界面和普通操作可直接执行；支付、密码和系统授权等敏感操作先等你确认，批准后由达序完成。完整授权：在控制开启期间直接尝试这些操作，系统限制仍然有效。模式只能在本机此页切换。", 14, Color.rgb(80, 90, 105)));
+        root.addView(text("逐项确认：读取界面和普通操作可直接执行；支付、密码和系统授权等敏感操作先等你确认，批准后由达氙完成。完整授权：在控制开启期间直接尝试这些操作，系统限制仍然有效。模式只能在本机此页切换。", 14, Color.rgb(80, 90, 105)));
         button(root, "切换授权模式", v -> {
             boolean full = "full".equals(DeviceState.policyMode(this));
             new AlertDialog.Builder(this).setTitle(full ? "切换为逐项确认" : "开启完整授权")
-                    .setMessage(full ? "之后的敏感操作会等待你逐项确认。已有确认将失效。" : "控制开启时，达序可直接尝试支付、密码输入和系统授权界面操作。系统实际拒绝仍会返回失败；安全锁屏不会被绕过。你可以随时暂停或切回逐项确认。")
+                    .setMessage(full ? "之后的敏感操作会等待你逐项确认。已有确认将失效。" : "控制开启时，达氙可直接尝试支付、密码输入和系统授权界面操作。系统实际拒绝仍会返回失败；安全锁屏不会被绕过。你可以随时暂停或切回逐项确认。")
                     .setNegativeButton("取消", null).setPositiveButton("确认切换", (dialog, which) -> {
                         DeviceState.setPolicyMode(this, full ? "confirm" : "full"); updateStatus();
                     }).show();
@@ -80,7 +80,7 @@ public final class ControlActivity extends Activity {
         approvalBox.setOrientation(LinearLayout.VERTICAL);
         root.addView(approvalBox);
         button(root, "1  开启无障碍服务", v -> openSettings(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-        if (Build.VERSION.SDK_INT >= 33) root.addView(text("如系统提示“受限设置”，请在达序应用信息菜单中允许后，再手动开启无障碍服务。", 13, Color.rgb(100, 110, 125)));
+        if (Build.VERSION.SDK_INT >= 33) root.addView(text("如系统提示“受限设置”，请在达氙应用信息菜单中允许后，再手动开启无障碍服务。", 13, Color.rgb(100, 110, 125)));
         button(root, "2  允许控制状态通知", v -> {
             if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) requestPermissions(new String[] {android.Manifest.permission.POST_NOTIFICATIONS}, 4002);
             else {
@@ -96,7 +96,7 @@ public final class ControlActivity extends Activity {
         }
         button(root, "添加桌面控制入口", v -> pinShortcut());
         root.addView(text("手机未设置安全密码且没有 SIM 锁时，远程唤醒会尝试通过系统关闭滑动锁屏。安全密码、SIM 保护或无法确认的锁屏状态需要你亲自解锁。审批不会重启已暂停的控制，也不会替代系统要求的授权。", 14, Color.rgb(80, 90, 105)));
-        root.addView(text("后台运行受手机系统和电池策略影响。请按需在系统应用信息中允许后台运行，并保持已有 Linux 环境在线。达序不会更改厂商容器或绕过系统权限。", 14, Color.rgb(80, 90, 105)));
+        root.addView(text("后台运行受手机系统和电池策略影响。请按需在系统应用信息中允许后台运行，并保持已有 Linux 环境在线。达氙不会更改厂商容器或绕过系统权限。", 14, Color.rgb(80, 90, 105)));
         activity = text("", 13, Color.rgb(100, 110, 125));
         activity.setPadding(0, dp(16), 0, dp(8));
         root.addView(activity);
@@ -175,7 +175,7 @@ public final class ControlActivity extends Activity {
         DeviceAccessibilityService service = DeviceAccessibilityService.current;
         JSONObject result = service == null ? null : service.decideApprovalMain(id, decision);
         if (result != null && ("approved".equals(result.optString("status")) || "declined".equals(result.optString("status")))) {
-            Toast.makeText(this, "accept".equals(decision) ? "已批准，达序将重试并执行" : "已拒绝该操作", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "accept".equals(decision) ? "已批准，达氙将重试并执行" : "已拒绝该操作", Toast.LENGTH_SHORT).show();
             if ("accept".equals(decision)) { moveTaskToBack(true); finish(); }
         } else Toast.makeText(this, result == null ? "无障碍服务未连接" : result.optJSONObject("error") == null ? "确认未生效" : result.optJSONObject("error").optString("message"), Toast.LENGTH_LONG).show();
         updateStatus();
@@ -186,11 +186,11 @@ public final class ControlActivity extends Activity {
     }
     private void openAppInfo() {
         try { startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:" + getPackageName()))); }
-        catch (Exception ignored) { Toast.makeText(this, "请在系统设置中打开达序应用信息", Toast.LENGTH_LONG).show(); }
+        catch (Exception ignored) { Toast.makeText(this, "请在系统设置中打开达氙应用信息", Toast.LENGTH_LONG).show(); }
     }
     private void pinShortcut() {
         ShortcutManager manager = getSystemService(ShortcutManager.class);
-        if (manager == null || !manager.isRequestPinShortcutSupported()) { Toast.makeText(this, "当前桌面不支持添加快捷入口，可长按达序图标使用手机控制", Toast.LENGTH_LONG).show(); return; }
+        if (manager == null || !manager.isRequestPinShortcutSupported()) { Toast.makeText(this, "当前桌面不支持添加快捷入口，可长按达氙图标使用手机控制", Toast.LENGTH_LONG).show(); return; }
         ShortcutInfo shortcut = new ShortcutInfo.Builder(this, "phone_control")
                 .setShortLabel("手机控制")
                 .setIcon(Icon.createWithResource(this, R.drawable.ic_launcher_foreground))

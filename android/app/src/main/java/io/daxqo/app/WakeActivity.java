@@ -77,7 +77,7 @@ public final class WakeActivity extends Activity {
         label.setTextSize(20);
         label.setTextColor(Color.rgb(35, 48, 64));
         label.setBackgroundColor(Color.WHITE);
-        label.setText("达序正在唤醒手机…");
+        label.setText("达氙正在唤醒手机…");
         setContentView(label);
         trace(this, "window_configured");
         handler.postDelayed(() -> finishWake("activity_deadline"), TIMEOUT_MS);

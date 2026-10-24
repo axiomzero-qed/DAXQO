@@ -1,11 +1,11 @@
 ---
 name: daxqo-handoff
-description: 将完整的长任务交给用户本机的 DAXQO 持续执行。用户说“交给达序”“长任务”“帮我持续做”等时使用；无需把任务拆成手机操作步骤。
+description: 将完整的长任务交给用户本机的 DAXQO 持续执行。用户说“交给达氙”“长任务”“帮我持续做”等时使用；无需把任务拆成手机操作步骤。
 ---
 
 # DAXQO 长任务转交
 
-用户明确希望交给达序持续处理时，通过现有设备 bash 通道 `stepclaw.exec` 在手机运行：
+用户明确希望交给达氙持续处理时，通过现有设备 bash 通道 `stepclaw.exec` 在手机运行：
 
 ```text
 python3 /root/phone-harness/assistant_client.py daxqo_submit --args '{"prompt":"完整目标、约束与必要上下文","title":"简短标题","requestId":"稳定唯一 ID"}'

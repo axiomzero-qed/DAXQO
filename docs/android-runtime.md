@@ -4,7 +4,7 @@
 
 ### Android App
 
-`android/` 是 Java 原生 Android 应用，包名 `io.daxqo.app`，显示名“达序 DAXQO”，没有第三方 UI 依赖。主界面在 WebView 中加载固定地址 `http://127.0.0.1:18880/`。WebView 只允许此 HTTP loopback 主机和端口；其他顶层页面交给系统浏览器，外部子资源拦截。带 user-info、过长 URL 或规范化后含凭据参数的外链会被拦截。
+`android/` 是 Java 原生 Android 应用，包名 `io.daxqo.app`，显示名“达氙 DAXQO”，没有第三方 UI 依赖。主界面在 WebView 中加载固定地址 `http://127.0.0.1:18880/`。WebView 只允许此 HTTP loopback 主机和端口；其他顶层页面交给系统浏览器，外部子资源拦截。带 user-info、过长 URL 或规范化后含凭据参数的外链会被拦截。
 
 应用没有通用 JavaScript 原生执行桥，只暴露窄化的 `window.DAXQOFiles.downloadFile(relativePath)`。它仅在可信 loopback GUI 顶层页面可用，只接受相对路径，并固定请求 `/api/files/download`；不向页面暴露 capability，不支持任意 URL、文件路径或命令执行。文件访问关闭、混合内容关闭、Safe Browsing 开启。HTTP 客户端禁用重定向，避免 capability 被带到非 loopback 地址。
 
@@ -54,7 +54,7 @@ powershell -ExecutionPolicy Bypass -File .\android\build.ps1 -InstallTools
 
 ### Android app
 
-`android/` is a native Java Android app with package name `io.daxqo.app` and display name “达序 DAXQO”. It has no third-party UI dependency. The main screen loads the fixed URL `http://127.0.0.1:18880/` in a WebView. The WebView accepts only this HTTP loopback host and port; other top-level pages are handed to the system browser, and external subresources are blocked. External links are rejected if they contain user-info, are too long, or contain credential parameters after normalization.
+`android/` is a native Java Android app with package name `io.daxqo.app` and display name “达氙 DAXQO”. It has no third-party UI dependency. The main screen loads the fixed URL `http://127.0.0.1:18880/` in a WebView. The WebView accepts only this HTTP loopback host and port; other top-level pages are handed to the system browser, and external subresources are blocked. External links are rejected if they contain user-info, are too long, or contain credential parameters after normalization.
 
 The app does not expose a general-purpose JavaScript-to-native execution bridge. Its only narrow file API is `window.DAXQOFiles.downloadFile(relativePath)`. It is available only to the trusted loopback GUI top-level page, accepts relative paths only, and always requests `/api/files/download`. It never exposes the capability to the page and does not support arbitrary URLs, file paths, or command execution. File access is disabled, mixed content is disabled, and Safe Browsing is enabled. HTTP clients do not follow redirects, preventing a capability from being forwarded away from loopback.
 

@@ -22,7 +22,7 @@ android {
         targetSdk 35
         versionCode 5
         versionName xmBuild ? '0.5.0-xm' : '0.5.0'
-        resValue 'string', 'app_name', xmBuild ? 'DAXQO for XM' : '达序 DAXQO'
+        resValue 'string', 'app_name', xmBuild ? 'DAXQO for XM' : '达氙 DAXQO'
         resValue 'string', 'platform_id', xmBuild ? 'xm' : 'standard'
         resValue 'string', 'pairing_scheme', xmBuild ? 'daxqo-xm' : 'daxqo'
         resValue 'string', 'shortcut_target_package', xmBuild ? 'io.daxqo.xm' : 'io.daxqo.app'

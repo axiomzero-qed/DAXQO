@@ -992,7 +992,7 @@ class MailControlService:
                       "needs_user": "需要你处理", "blocked_system": "系统限制，未能继续", "waiting_approval": "等待你的审批",
                       "queued": "排队中", "running": "执行中", "approved": "已批准，任务继续", "consumed": "已批准，任务继续",
                       "declined": "已拒绝", "expired": "已过期", "stale": "已失效", "instructions": "需要审批编号"}
-            lines = ["达序手机任务报告", "", "任务：" + str(report.get("title", "邮箱任务")),
+            lines = ["达氙手机任务报告", "", "任务：" + str(report.get("title", "邮箱任务")),
                      "状态：" + labels.get(report.get("status"), str(report.get("status", "未知"))),
                      "任务编号：" + str(report.get("taskId", ""))]
             approval = report.get("approval")
@@ -1006,7 +1006,7 @@ class MailControlService:
             if report.get("result"): lines += ["", str(report["result"])]
             if report.get("error"): lines += ["", "处理说明：" + str(report["error"])]
             if report.get("truncated"): lines += ["", "报告已节选，完整内容请在手机 DAXQO 对话中查看。"]
-            message = self._plain_message(command_id, config, contact, "达序任务报告：", "\n".join(lines))
+            message = self._plain_message(command_id, config, contact, "达氙任务报告：", "\n".join(lines))
         else:
             payload = sign({"v": 1, "action": "result", "contact": contact["email"], "nonce": uuid.uuid4().hex,
                             "sentAt": _stamp(), "report": report}, contact["secret"])
@@ -1058,7 +1058,7 @@ class MailControlService:
             with self.store.lock, self.store.db:
                 cursor = self.store.db.execute("UPDATE mail_commands SET ack_status='sending' WHERE id=? AND transport='plain' AND ack_status='pending'", (command_id,))
                 if cursor.rowcount != 1: return
-        message = self._plain_message(command_id, config, contact, "达序已接单：",
+        message = self._plain_message(command_id, config, contact, "达氙已接单：",
             "已验证你的 Gmail 身份，已在手机创建任务，正在排队或执行。\n\n任务编号：" + task_id
             + "\n\n完成或遇到系统限制后会通过本邮箱回报，也可在手机 DAXQO 查看进度。若需要权限审批，可通过 DAXQO 或待审批邮件作决定；不要求你代为操作手机。")
         try:
