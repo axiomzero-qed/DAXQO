@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 DEFAULT_PORT = 18882
 DEFAULT_BACKEND_PORT = 18880
 MAX_REQUEST = 1024 * 1024
@@ -32,6 +32,7 @@ ALLOWED_FILES = {
     "server.py", "supervisor.py", "runtime_control.py", "test_server.py",
     "test_supervisor.py", "test_runtime_control.py", "models-deepseek.json",
     "WORKSPACE_AGENTS.md",
+    "artifacts.py", "test_artifacts.py", "test_email_attachments.py",
     "task_services.py", "test_task_services.py",
     "android_mcp_server.py", "test_android_mcp.py", "phone_backends.py", "test_phone_backends.py",
     "remote_protocol.py", "test_remote_protocol.py", "email_control.py", "test_email_control.py",

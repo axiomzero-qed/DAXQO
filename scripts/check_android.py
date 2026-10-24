@@ -75,7 +75,7 @@ def main() -> None:
     if args.platform == "xm":
         version += "-xm"
     badging = run([tools / ("aapt" + suffix), "dump", "badging", apk], capture=True)
-    require(re.search(r"^package: name='" + re.escape(package) + r"' versionCode='5' versionName='"
+    require(re.search(r"^package: name='" + re.escape(package) + r"' versionCode='6' versionName='"
                       + re.escape(version) + "'", badging, re.M) is not None,
             "Packaged app ID/version does not match the selected platform.")
     manifest = run([tools / ("aapt2" + suffix), "dump", "xmltree", apk,
