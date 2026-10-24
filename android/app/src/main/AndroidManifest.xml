@@ -43,7 +43,7 @@
         <service android:name=".DeviceAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true"
-            android:label="达序手机控制">
+            android:label="达氙手机控制">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>

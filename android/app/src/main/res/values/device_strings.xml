@@ -1,4 +1,4 @@
 <resources>
     <string name="phone_control_shortcut">手机控制</string>
-    <string name="device_accessibility_description">允许达序在你授权的任务中读取屏幕、截图、点击、滑动、长按、输入和打开应用。控制只通过已配对的本机服务提供。可随时在达序手机控制页或通知中暂停。锁屏、支付、密码、身份认证和系统授权需要你亲自处理；不会绕过系统限制。</string>
+    <string name="device_accessibility_description">允许达氙在你授权的任务中读取屏幕、截图、点击、滑动、长按、输入和打开应用。控制只通过已配对的本机服务提供。可随时在达氙手机控制页或通知中暂停。锁屏、支付、密码、身份认证和系统授权需要你亲自处理；不会绕过系统限制。</string>
 </resources>

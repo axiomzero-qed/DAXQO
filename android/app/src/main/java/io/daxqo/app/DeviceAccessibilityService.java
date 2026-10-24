@@ -101,7 +101,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         String text = DeviceState.enabled(this) ? "已允许本机任务操作手机 · 点此管理" : reason.isEmpty() ? "手机操作已暂停 · 点此管理" : "需要你处理：" + reason;
         Notification notice = new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(R.drawable.ic_launcher_foreground)
-                .setContentTitle("达序手机控制")
+                .setContentTitle("达氙手机控制")
                 .setContentText(text)
                 .setContentIntent(content)
                 .setOngoing(true)
@@ -164,7 +164,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
 
     private interface Completion { void done(JSONObject response); }
     private void executeMain(String id, String action, JSONObject args, Completion callback) throws Exception {
-        if (current != this) { callback.done(failure(id, "accessibility_unavailable", "请在系统设置中手动启用达序手机控制")); return; }
+        if (current != this) { callback.done(failure(id, "accessibility_unavailable", "请在系统设置中手动启用达氙手机控制")); return; }
         // Wake may dismiss only a non-secure swipe screen through Android's
         // official API. Secure/SIM/unknown states always remain user-controlled.
         if ("wake".equals(action)) {
@@ -248,7 +248,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
             WakeActivity.finishActive();
             if (!lock.known) callback.done(failure(id, "locked", "无法确认锁屏安全状态，请亲自亮屏解锁"));
             else if (lock.locked) callback.done(failure(id, "locked", lock.secureLock || lock.deviceSecure
-                    ? "手机设有安全锁或 SIM 保护，请亲自解锁；达序不会自动确认" : "系统未关闭滑动锁屏，请在手机上检查后重试"));
+                    ? "手机设有安全锁或 SIM 保护，请亲自解锁；达氙不会自动确认" : "系统未关闭滑动锁屏，请在手机上检查后重试"));
             else callback.done(failure(id, "wake_unavailable", "系统尚未完成唤醒，请在手机上检查后重试"));
             return;
         }
@@ -321,9 +321,9 @@ public final class DeviceAccessibilityService extends AccessibilityService {
             ApprovalLedger.Result result = DeviceState.approvals.check(operation, page, action, foregroundPackage(),
                     actionSummary(action) + "：" + reason + approvalContext(), android.os.SystemClock.elapsedRealtime());
             if (result.code.isEmpty()) return null;
-            String message = "action_denied".equals(result.code) ? "你已拒绝这项操作，达序不会执行"
+            String message = "action_denied".equals(result.code) ? "你已拒绝这项操作，达氙不会执行"
                     : "stale_approval".equals(result.code) ? "操作确认因过期、控制变更或页面变化失效，请重新确认"
-                    : "请确认这项操作；批准后达序会重试并自行执行";
+                    : "请确认这项操作；批准后达氙会重试并自行执行";
             return approvalResult(id, result, message);
         }
     }
@@ -342,7 +342,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
     }
     private JSONObject lockedFailure(String id, DeviceState.LockState lock) {
         return failure(id, "locked", !lock.known ? "无法确认锁屏安全状态，请先在手机上核对"
-                : lock.secureLock || lock.deviceSecure ? "手机设有安全锁或 SIM 保护，请亲自解锁；达序不会绕过锁屏"
+                : lock.secureLock || lock.deviceSecure ? "手机设有安全锁或 SIM 保护，请亲自解锁；达氙不会绕过锁屏"
                 : "手机仍在无密码滑动锁屏，请先调用 android_action 的 wake 再重试");
     }
     static String operationIdentity(String action, Map<String, String> canonicalFields, boolean validatedNodeInput) {
@@ -778,7 +778,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
                 finally { if (copy != null) copy.recycle(); if (bitmap != null) bitmap.recycle(); buffer.close(); }
             }
             @Override public void onFailure(int code) {
-                callback.done(failure(id, code == ERROR_TAKE_SCREENSHOT_SECURE_WINDOW ? "secure_window" : "screenshot_failed", code == ERROR_TAKE_SCREENSHOT_SECURE_WINDOW ? "当前应用禁止截图，请亲自查看；达序不会绕过保护" : "系统未提供截图（错误" + code + "），请稍后重新读取屏幕"));
+                callback.done(failure(id, code == ERROR_TAKE_SCREENSHOT_SECURE_WINDOW ? "secure_window" : "screenshot_failed", code == ERROR_TAKE_SCREENSHOT_SECURE_WINDOW ? "当前应用禁止截图，请亲自查看；达氙不会绕过保护" : "系统未提供截图（错误" + code + "），请稍后重新读取屏幕"));
             }
         });
     }

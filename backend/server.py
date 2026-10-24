@@ -1242,7 +1242,7 @@ class Harness:
             if not task or task.get("stop_requested") or task["status"] in ("stopped", "failed", "cancelled"):
                 raise ValueError("任务已停止，不能继续批准操作")
             if record["status"] in ("expired", "stale") or record["expiresAt"] <= time.time()*1000:
-                raise ValueError("审批已过期或界面已变化，请让达序重新观察并申请")
+                raise ValueError("审批已过期或界面已变化，请让达氙重新观察并申请")
             if record["status"] in ("approved", "consumed") and decision == "accept": return record
             if record["status"] == "declined":
                 if decision == "decline": return record

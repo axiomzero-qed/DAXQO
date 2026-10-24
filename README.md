@@ -1,4 +1,4 @@
-# DAXQO 达序
+# DAXQO 达氙
 
 ![DAXQO app icon](assets/daxqo-app-icon.png)
 
