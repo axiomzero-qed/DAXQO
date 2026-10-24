@@ -18,7 +18,7 @@ public final class PlatformProfile {
     private final String[] stores;
     private PlatformProfile(String id, boolean xm) {
         this.id = id;
-        this.setupGuidance = xm ? "澎湃 OS：请将 DAXQO 的省电策略设为“无限制”；在 DAXQO“权限管理 → 其他权限”中允许“锁屏显示”和“后台弹出界面”。请在系统设置中自行确认，本页不会自动更改授权。" : "";
+        this.setupGuidance = xm ? "澎湃 OS：请将 DAXQO 的省电策略设为“无限制”；在 DAXQO“权限管理 → 其他权限”中允许“锁屏显示”和“后台弹出界面”。请在系统设置中自行确认，本页不会自动更改授权。使用 Termux 承载运行环境时，Termux 也必须设为“无限制”并允许后台运行、保持会话；受限会导致本机服务中断。" : "";
         this.setupButtonLabel = xm ? "4  检查澎湃OS权限" : "4  检查应用设置";
         this.stores = (xm ? XM_STORES : STANDARD_STORES).clone();
     }

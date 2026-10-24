@@ -9,7 +9,6 @@ import tempfile
 import threading
 import unittest
 import urllib.parse
-import urllib.parse
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
@@ -141,6 +140,31 @@ class AssistantMCPTests(unittest.TestCase):
         self.assertEqual(result["result"]["text"], "0123456789")
         self.assertFalse(result["result"]["truncated"])
         self.assertIsNone(result["resultNextOffset"])
+
+    def test_uppercase_task_ids_use_the_canonical_service_route(self):
+        result = self.value(self.tool("daxqo_status", {"taskId": TASK_ID.upper()}))
+        self.assertEqual(result["taskId"], TASK_ID)
+        self.assertEqual(self.http.seen[-1]["path"], f"/api/assistant/tasks/{TASK_ID}?offset=0&limit=2000")
+
+    def test_oversized_frame_cannot_dispatch_a_json_suffix_as_a_task(self):
+        suffix = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "name": "daxqo_submit", "arguments": {"prompt": "must not execute", "requestId": "oversized-frame-001"}}}).encode()
+        incoming = b" " * (mcp.MAX_REQUEST_LINE + 1) + suffix + b'\n{"jsonrpc":"2.0","id":2,"method":"ping"}\n'
+        output = io.BytesIO()
+        self.server.serve(io.BytesIO(incoming), output)
+        replies = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(len(replies), 2)
+        self.assertEqual(replies[0]["error"]["code"], -32600)
+        self.assertEqual(replies[1], {"jsonrpc": "2.0", "id": 2, "result": {}})
+        self.assertEqual(self.http.seen, [])
+
+    def test_invalid_rpc_identifiers_are_rejected_before_task_dispatch(self):
+        for ident in (True, [], {}):
+            with self.subTest(ident=ident):
+                reply = self.server.dispatch({"jsonrpc": "2.0", "id": ident, "method": "tools/call",
+                    "params": {"name": "daxqo_submit", "arguments": {"prompt": "must not execute", "requestId": "invalid-rpc-id-001"}}})
+                self.assertEqual(reply["error"]["code"], -32600)
+        self.assertEqual(self.http.seen, [])
 
     def test_continue_and_stop_use_only_fixed_routes_and_forward_request_id(self):
         request_id = "follow-up-id-0001"

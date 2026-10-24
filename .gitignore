@@ -21,3 +21,4 @@ build/
 local.properties
 *handoff*.json
 *capability*
+/website/

@@ -20,6 +20,7 @@ REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$", re.ASCII)
 MAX_PROMPT = 50000
 MAX_TITLE = 300
 MAX_TASK_RESPONSE = 8 * 1024 * 1024
+MAX_REQUEST_LINE = 1024 * 1024
 
 
 class TaskBridge(AndroidBridge):
@@ -92,7 +93,7 @@ def _request_id(value: Any) -> str:
 def _task_id(value: Any) -> str:
     if not isinstance(value, str) or not TASK_ID_RE.fullmatch(value):
         raise BridgeError("invalid_args", "taskId must be a task UUID")
-    return value
+    return value.lower()
 
 
 def _text(value: Any, field: str, maximum: int, *, nonempty: bool = True) -> str:
@@ -214,6 +215,8 @@ class AssistantMCP:
             return {"jsonrpc": "2.0", "id": message.get("id") if isinstance(message, dict) else None,
                     "error": {"code": -32600, "message": "Invalid JSON-RPC request"}}
         method, ident = message.get("method"), message.get("id")
+        if ident is not None and type(ident) not in (int, str):
+            return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid request id"}}
         if not isinstance(method, str):
             return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32600, "message": "Missing method"}}
         if ident is None:
@@ -243,9 +246,19 @@ class AssistantMCP:
 
     def serve(self, source: BinaryIO, sink: BinaryIO) -> int:
         while True:
-            line = source.readline(1024 * 1024 + 1)
+            line = source.readline(MAX_REQUEST_LINE + 1)
             if not line:
                 return 0
+            if len(line) > MAX_REQUEST_LINE:
+                # Drain the entire rejected frame. A JSON-looking suffix of an
+                # oversized line must never be executed as another request.
+                while line and not line.endswith(b"\n"):
+                    line = source.readline(MAX_REQUEST_LINE + 1)
+                response = {"jsonrpc": "2.0", "id": None,
+                            "error": {"code": -32600, "message": "Request line too large"}}
+                sink.write((json.dumps(response, separators=(",", ":")) + "\n").encode("utf-8"))
+                sink.flush()
+                continue
             try:
                 request = json.loads(line)
                 response = self.dispatch(request)

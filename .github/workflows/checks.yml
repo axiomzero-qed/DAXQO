@@ -1,0 +1,59 @@
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install email-authentication test dependencies
+        run: python -m pip install dkimpy==1.1.8 dnspython==2.8.0 cryptography
+      - run: python -m unittest discover -s backend -v
+      - run: python -m unittest discover -s scripts -v
+
+  android:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [standard, xm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '8.10.2'
+          cache-provider: basic
+      - name: Install Android SDK 35
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Build and lint
+        run: gradle -p android --no-daemon -Pplatform=${{ matrix.platform }} assembleDebug lintDebug
+      - name: Host regressions and packaged APK checks
+        run: python scripts/check_android.py --platform ${{ matrix.platform }}

@@ -70,6 +70,8 @@ V0.4 在现有手机 Linux 环境上增加原生手机控制及邮件远程控�
 
 ## 仓库结构
 
+轨迹采集器和 Motor 分别在独立开源仓库维护，其他 Harness 可通过 API、CLI 或 MCP 复用。版本和可选原生扩展见[独立工具说明](docs/OPTIONAL-TOOLS.md)。
+
 ```text
 android/           Android App 与可重复构建脚本
 backend/           Python 服务、Codex App Server 适配、运行服务与测试
@@ -93,6 +95,8 @@ MCP CLI 与 Skill 安装器测试在仓库根目录运行：
 python3 scripts/test_assistant_client.py
 python3 scripts/test_install_assistant_skill.py
 ```
+
+GitHub 自动检查覆盖 Linux/Windows 的 Python 3.10/3.12 回归，以及 Standard/XM 的 Android 构建和 lint。已有 debug APK 时，可配置 JDK 17 的 `JAVA_HOME` 和 SDK 35 的 `ANDROID_HOME`，运行 `python3 scripts/check_android.py --platform standard`（XM 用 `--platform xm`），检查五组 Java 回归、包名/版本、配对链接、快捷方式和唤醒入口。它不连接手机。
 
 测试使用明确标记的协议/进程夹具，不替代真实手机或模型验收。Windows 若尚无 Android 构建工具，可运行：
 
@@ -162,6 +166,8 @@ V0.4 added native phone control and email remote control on the existing phone L
 Once ordinary Gmail handling is enabled, new messages from registered contacts that pass full DKIM can submit tasks. Subject and body are combined as task input; a blank body uses the subject alone. Sensitive phone writes wait for one-time approval in the app or through a trusted-mailbox reply whose first body line is `确认 <UUID>` or `拒绝 <UUID>`; bare `确认` is allowed only when exactly one valid approval is pending. The subject alone is never accepted, and messages with attachments are rejected. On 2026-10-23 04:04:57–04:06:18, a subject-only email created a task; approval resumed the same thread while the phone was screen-off, and it consumed the original approval, performed Back on Settings App info, completed, and sent the final report. Other settings, installation-permission taps, and payment actions were not tested. Identity validation, DKIM, and replay protections remain unchanged.
 
 ### Repository layout
+
+Trajectory Collector and Motor are maintained in independent open-source repositories and can be reused by other harnesses through API, CLI or MCP. See [optional tools](docs/OPTIONAL-TOOLS.md) for versions and native extensions.
 
 ```text
 android/           Android app and reproducible build scripts

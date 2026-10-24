@@ -25,7 +25,7 @@ python3 scripts/install_linux.py --print-pairing --pairing-scheme daxqo-xm
 
 随后由安装器配置的 supervisor 管理服务；运行桥使用本机端口 `18882`，backend 使用 `18880`。DAXQO 不创建或唤醒厂商 Linux 环境。Termux/PRoot 安装流程已退出当前支持路径；历史实验记录见 [XM-ACCEPTANCE](XM-ACCEPTANCE.md)，其结果不证明 XM 可直接运行 Neo 厂商 Linux，也不证明这条共用安装路径已完成端到端验收。
 
-Android 的 PlatformProfile 提供小米系统设置提示。根据设备和系统版本，用户可能需要手动配置后台运行、省电策略、锁屏显示或弹窗权限；应用不会静默授予权限。Accessibility 是当前 MCP phone backend；Shizuku 和 OEM backend 尚不可用，选中时会明确拒绝，不代表已有实现。
+Android 的 PlatformProfile 提供小米系统设置提示。根据设备和系统版本，用户可能需要手动配置后台运行、省电策略、锁屏显示或弹窗权限；应用不会静默授予权限。若选择以 Termux 承载本机服务，DAXQO 和 Termux 都必须设为“无限制”、允许后台运行，并保持 Termux 会话；任一应用受限都可能导致本机服务中断。当前 K70 用户已手动为 Termux 开启无限制后台运行；这是该设备的运行前置，不代表 Termux 在其他机型上正式受支持。Accessibility 是当前 MCP phone backend；Shizuku 和 OEM backend 尚不可用，选中时会明确拒绝，不代表已有实现。
 
 ### 验证范围
 
@@ -52,6 +52,6 @@ python3 scripts/install_linux.py --print-pairing --pairing-scheme daxqo-xm
 
 The configured supervisor manages the service; the runtime bridge uses local port `18882` and the backend uses `18880`. DAXQO does not create or wake the vendor Linux environment. Termux/PRoot installation has left the supported path. The [XM acceptance record](XM-ACCEPTANCE.md) documents an earlier experiment and does not prove compatibility with Neo vendor Linux or end-to-end operation of the current shared path.
 
-Android's PlatformProfile provides Xiaomi settings guidance. Depending on the device and OS version, users may need to configure background operation, battery policy, lock-screen display, or pop-up permissions manually; the app does not grant them silently. Accessibility is the current MCP phone backend. Shizuku and OEM backends are unavailable; selecting them is explicitly rejected.
+Android's PlatformProfile provides Xiaomi settings guidance. Depending on the device and OS version, users may need to configure background operation, battery policy, lock-screen display, or pop-up permissions manually; the app does not grant them silently. If Termux is chosen to host local services, both DAXQO and Termux must use the unrestricted battery policy, be allowed to run in the background, and the Termux session must stay active; restricting either app can interrupt local services. The current K70 owner has manually enabled unrestricted background operation for Termux. This is a prerequisite for that device and does not establish official Termux support on other models. Accessibility is the current MCP phone backend. Shizuku and OEM backends are unavailable; selecting them is explicitly rejected.
 
 End-to-end operation of the current XM path has not been verified on a phone. Secure lock-screen behavior, long screen-off runs, and all Xiaomi or other OEM versions remain unverified. Treat `XM-ACCEPTANCE.md` as a historical record of the old Termux/PRoot experiment, not proof of compatibility or acceptance for the current architecture.

@@ -26,7 +26,9 @@ public final class PlatformProfileRegression {
         check(java.util.Arrays.equals(standard.appStoreCandidates(), standard.appStoreCandidates("unknown")), "unknown manufacturer keeps profile order");
         check(!standard.setupGuidance.contains("澎湃") && !standard.setupGuidance.contains("锁屏显示"), "standard has no XM guidance");
         check(xm.setupGuidance.contains("后台弹出界面") && xm.setupGuidance.contains("锁屏显示"), "XM permissions guidance");
-        check(!xm.setupGuidance.toLowerCase(java.util.Locale.ROOT).contains("termux"), "XM guidance is environment-neutral");
+        check(xm.setupGuidance.contains("使用 Termux 承载运行环境时") && xm.setupGuidance.contains("Termux 也必须设为“无限制”")
+                && xm.setupGuidance.contains("保持会话") && xm.setupGuidance.contains("本机服务中断"),
+                "XM guidance includes the conditional Termux background prerequisite");
         boolean rejected = false;
         try { PlatformProfile.fromId("other"); } catch (IllegalArgumentException expected) { rejected = true; }
         check(rejected, "unknown profile rejected");
