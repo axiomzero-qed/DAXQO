@@ -5,11 +5,11 @@
 [中文](#中文) | [English](#english)
 
 
-## V0.5 任务规划与助手转交 / V0.5 planning and assistant handoff
+## V0.6 语音草稿与成果交付 / V0.6 voice drafts and artifact delivery
 
-V0.5 会先给模型提供本机概况和可启动应用清单，再规划并优先复用已装 App；新增长任务 MCP 的提交、查询、继续和停止，以及供现有设备助手调用的 CLI/Skill。通知、定位和本机号码登录采用机主默认偏好。安装、身份验证和真机验收范围见 [V0.5 说明](docs/V0.5.md)。
+V0.6 增加本机优先的语音转写草稿、GUI 工作区成果卡片和授权栅格图片预览，并收紧远程邮件附件范围与大小限制。网页语音入口需配套新版原生 APK；本机麦克风识别尚未真机验收。历史任务规划与助手转交见 [V0.5 说明](docs/V0.5.md)，本版行为说明见 [V0.6 指南](docs/V0.6.md)。
 
-V0.5 supplies device and launcher-app facts before planning, reuses installed apps, and adds task submission/status/continuation/stop over MCP with a CLI/Skill handoff for the existing device assistant. Owner defaults cover notifications, location, and phone-number login. See the [V0.5 guide](docs/V0.5.md) for setup and verified scope.
+V0.6 adds local-first speech transcription into editable drafts, GUI workspace artifact cards and authorized raster-image previews, and tighter scope and size limits for remote email attachments. The voice button requires the matching newer native APK; microphone recognition has not been verified on a physical device. See the historical [V0.5 guide](docs/V0.5.md) and the [V0.6 guide](docs/V0.6.md).
 
 ## 中文
 
@@ -17,7 +17,7 @@ DAXQO 是单仓库双平台配置：Standard 为基准版本（基准提交 `837
 
 DAXQO 是面向手机的 Agent 工作台：Android 提供持续对话与成果界面，工具在手机已有的 Linux 环境执行，模型通过用户配置的 API 接入。项目采用 [MIT 许可证](LICENSE)；仓库地址为 [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO)。第三方依赖见[第三方说明](THIRD_PARTY_NOTICES.md)。
 
-当前源码为 V0.5：在继承 V0.4 手机控制与邮件远程控制的基础上，增加任务规划上下文和助手长任务转交。见 [V0.5 说明](docs/V0.5.md)、[V0.4 控制与邮件指南](docs/V0.4.md) 和 [V0.4 STEPX Neo 验收记录](docs/NEO-V04-ACCEPTANCE.md)。GitHub 上现有的 [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) 仍是 V0.3 APK，不包含 V0.5。构建当前源码请使用：
+当前源码为 V0.6，包含 V0.5 的任务规划与助手转交，以及语音草稿、GUI 成果交付和受限邮件附件。见 [V0.6 指南](docs/V0.6.md)、[V0.5 历史说明](docs/V0.5.md)、[V0.4 控制与邮件指南](docs/V0.4.md) 和 [V0.4 STEPX Neo 验收记录](docs/NEO-V04-ACCEPTANCE.md)。GitHub 上现有的 [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) 仍是 V0.3 APK，不包含 V0.6。构建当前源码请使用：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1
@@ -37,7 +37,7 @@ powershell -ExecutionPolicy Bypass -File .\android\build.ps1 -Xm -Lint
    python3 scripts/install_linux.py
    ```
 
-2. 可下载并安装 [V0.3 Android APK](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0)，这是开发签名预览包，也是当前 GitHub release；它不包含 V0.5。要使用当前源码功能，请从当前源码构建 APK（见上面的构建命令）。Codex runtime 是独立依赖；Linux 安装器会从官方 npm registry 获取固定版本，或复用现有官方 runtime。默认执行策略为 `danger-full-access`，运行任务可访问该 Linux 用户可访问的文件和进程。
+2. 可下载并安装 [V0.3 Android APK](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0)，这是开发签名预览包，也是当前 GitHub release；它不包含 V0.6。要使用当前源码功能，请从当前源码构建 APK（见上面的构建命令）。Codex runtime 是独立依赖；Linux 安装器会从官方 npm registry 获取固定版本，或复用现有官方 runtime。默认执行策略为 `danger-full-access`，运行任务可访问该 Linux 用户可访问的文件和进程。
 3. 生成一次性 Android 配对链接，并仅在自己的 DAXQO App 中导入：
 
    ```sh
@@ -64,7 +64,7 @@ V0.3 真机结果和未完成项目见[V0.3 验收记录](docs/V0.3-ACCEPTANCE.m
 
 ## V0.4 历史与继承功能 / V0.4 history and inherited features
 
-V0.4 在现有手机 Linux 环境上增加原生手机控制及邮件远程控制入口；这些能力由 V0.5 继承。手机控制提供默认 `confirm` 和 `full` 模式；`full` 只允许 DAXQO 尝试 Android 已许可的操作，不会提升系统权限。`confirm` 下敏感写操作需一次性批准，可在 App 审批卡或可信邮箱确认，批准后原任务自动继续。网页仅显示模式，不切换模式；请在手机顶栏“手机控制”页设置。辅助功能默认关闭，远程邮件需单独配置邮箱和联系人。可信联系人拥有 Harness 权限，并非隔离沙箱。邮件审批和息屏续跑闭环已在真机通过，验收范围仅为 Settings App info 的 Back；其他设置、安装权限点击和支付未测试。设备限制见[V0.4 指南](docs/V0.4.md)。
+V0.4 在现有手机 Linux 环境上增加原生手机控制及邮件远程控制入口；这些能力由 V0.5 和 V0.6 继承。手机控制提供默认 `confirm` 和 `full` 模式；`full` 只允许 DAXQO 尝试 Android 已许可的操作，不会提升系统权限。`confirm` 下敏感写操作需一次性批准，可在 App 审批卡或可信邮箱确认，批准后原任务自动继续。网页仅显示模式，不切换模式；请在手机顶栏“手机控制”页设置。辅助功能默认关闭，远程邮件需单独配置邮箱和联系人。可信联系人拥有 Harness 权限，并非隔离沙箱。邮件审批和息屏续跑闭环已在真机通过，验收范围仅为 Settings App info 的 Back；其他设置、安装权限点击和支付未测试。设备限制见[V0.4 指南](docs/V0.4.md)。
 
 启用普通 Gmail 后，已登记联系人通过完整 DKIM 验证的新邮件可提交任务；主题和正文一同作为任务输入，正文为空时用主题。敏感手机写操作会等待一次确认，可在 App 审批卡或可信邮箱按正文首行回复 `确认 <UUID>` / `拒绝 <UUID>`；唯一一项有效待批时可仅回复 `确认`，不能只用主题确认。附件邮件整封拒绝。2026-10-23 04:04:57–04:06:18 的真实验收中，纯标题来信创建任务，确认后同一 thread 息屏唤醒并消费原审批，Settings App info 页 Back 执行一次，任务完成且最终回信送达；其他设置、安装权限点击和支付未测试。现有身份验证、DKIM 与防重放校验保持不变。
 
@@ -114,7 +114,7 @@ DAXQO is one repository with two platform configurations. Standard is the baseli
 
 DAXQO is a mobile Agent workspace. Its Android app provides persistent conversations and a results interface; tools run inside a Linux environment already available on the phone, and models are connected through an API configured by the user. The project uses the [MIT License](LICENSE); its repository is [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO). See [third-party notices](THIRD_PARTY_NOTICES.md) for external dependencies.
 
-The current source is V0.5, inheriting V0.4 phone control and email remote control while adding task-planning context and assistant handoff for long-running tasks. See the [V0.5 guide](docs/V0.5.md), [V0.4 phone-control and email guide](docs/V0.4.md), and [V0.4 STEPX Neo acceptance record](docs/NEO-V04-ACCEPTANCE.md). The existing [V0.3 GitHub release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) remains a V0.3 APK and does not include V0.5. Build the current source with:
+The current source is V0.6, including V0.5 task planning and assistant handoff alongside voice drafts, GUI artifact delivery, and scoped email attachments. See the [V0.6 guide](docs/V0.6.md), [historical V0.5 guide](docs/V0.5.md), [V0.4 phone-control and email guide](docs/V0.4.md), and [V0.4 STEPX Neo acceptance record](docs/NEO-V04-ACCEPTANCE.md). The existing [V0.3 GitHub release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) remains a V0.3 APK and does not include V0.6. Build the current source with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1
@@ -134,7 +134,7 @@ powershell -ExecutionPolicy Bypass -File .\android\build.ps1 -Xm -Lint
    python3 scripts/install_linux.py
    ```
 
-2. You may download and install the [V0.3 Android APK](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0), a development-signed preview and the current GitHub release; it does not include V0.5. To use the current source features, build an APK from the current source using the command above. Codex runtime is an independent dependency; the Linux installer fetches a pinned release from the official npm registry or reuses an existing official runtime. The default execution policy is `danger-full-access`, which lets tasks access files and processes available to that Linux user.
+2. You may download and install the [V0.3 Android APK](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0), a development-signed preview and the current GitHub release; it does not include V0.6. To use the current source features, build an APK from the current source using the command above. Codex runtime is an independent dependency; the Linux installer fetches a pinned release from the official npm registry or reuses an existing official runtime. The default execution policy is `danger-full-access`, which lets tasks access files and processes available to that Linux user.
 3. Create a one-time Android pairing link and import it only into your DAXQO app:
 
    ```sh
@@ -161,7 +161,7 @@ See the [V0.3 acceptance record](docs/V0.3-ACCEPTANCE.md) for device results and
 
 ### V0.4 history and inherited features
 
-V0.4 added native phone control and email remote control on the existing phone Linux environment; these features are inherited by V0.5. Phone Control offers default `confirm` and `full` modes; `full` only lets DAXQO attempt actions Android already permits and does not elevate system permissions. In `confirm`, sensitive writes require one-time approval from the app approval card or a trusted mailbox; approval resumes the original task. The web UI displays but cannot change the mode; use Phone Control in the phone app’s top bar. Accessibility remains off by default, and email requires separate mailbox/contact setup. Trusted contacts receive Harness permissions, not an isolated sandbox. The email approval and screen-off continuation loop passed on-device for Back on Android Settings App info. Other settings, installation-permission taps, and payment actions were not tested. See the [V0.4 guide](docs/V0.4.md).
+V0.4 added native phone control and email remote control on the existing phone Linux environment; these features are inherited by V0.5 and V0.6. Phone Control offers default `confirm` and `full` modes; `full` only lets DAXQO attempt actions Android already permits and does not elevate system permissions. In `confirm`, sensitive writes require one-time approval from the app approval card or a trusted mailbox; approval resumes the original task. The web UI displays but cannot change the mode; use Phone Control in the phone app’s top bar. Accessibility remains off by default, and email requires separate mailbox/contact setup. Trusted contacts receive Harness permissions, not an isolated sandbox. The email approval and screen-off continuation loop passed on-device for Back on Android Settings App info. Other settings, installation-permission taps, and payment actions were not tested. See the [V0.4 guide](docs/V0.4.md).
 
 Once ordinary Gmail handling is enabled, new messages from registered contacts that pass full DKIM can submit tasks. Subject and body are combined as task input; a blank body uses the subject alone. Sensitive phone writes wait for one-time approval in the app or through a trusted-mailbox reply whose first body line is `确认 <UUID>` or `拒绝 <UUID>`; bare `确认` is allowed only when exactly one valid approval is pending. The subject alone is never accepted, and messages with attachments are rejected. On 2026-10-23 04:04:57–04:06:18, a subject-only email created a task; approval resumed the same thread while the phone was screen-off, and it consumed the original approval, performed Back on Settings App info, completed, and sent the final report. Other settings, installation-permission taps, and payment actions were not tested. Identity validation, DKIM, and replay protections remain unchanged.
 

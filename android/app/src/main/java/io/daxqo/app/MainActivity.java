@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.ClipData;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.graphics.Color;
@@ -29,6 +30,7 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+import org.json.JSONObject;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -53,10 +55,19 @@ public final class MainActivity extends Activity {
     private volatile boolean trustedGuiLoaded;
     private boolean connectionInProgress;
     private static final int FILE_CHOOSER_REQUEST = 1042;
+    private static final int VOICE_PERMISSION_REQUEST = 1043;
     private ValueCallback<Uri[]> fileChooserCallback;
+    private VoiceInputController voiceInput;
+    private boolean voicePermissionPending;
+    private String pendingVoiceSession;
+    private String activeVoiceSession;
+    private long pendingVoicePage;
+    private long pageGeneration;
+    private boolean shownSystemRecognitionNotice;
 
     @Override protected void onStart() { super.onStart(); visibleActivity = this; }
     @Override protected void onStop() {
+        cancelVoiceSession(true);
         if (visibleActivity == this) visibleActivity = null;
         super.onStop();
     }
@@ -97,6 +108,20 @@ public final class MainActivity extends Activity {
             getWindow().setNavigationBarContrastEnforced(false);
         }
         consumePairIntent(getIntent());
+        voiceInput = new VoiceInputController(this, new VoiceInputController.Callback() {
+            @Override public void onStatus(String message) {
+                String type = "正在识别…".equals(message) ? "processing" : "listening";
+                emitVoiceEvent(type, null, null, activeVoiceSession);
+            }
+            @Override public void onFinalText(String text) {
+                emitVoiceEvent("result", text, null, activeVoiceSession);
+                activeVoiceSession = null;
+            }
+            @Override public void onError(String message) {
+                emitVoiceEvent("error", null, message, activeVoiceSession);
+                activeVoiceSession = null;
+            }
+        });
         buildView();
         prepareAndLoadGui();
         if (ControlActivity.ACTION_CONTROL.equals(getIntent().getAction())) {
@@ -226,6 +251,8 @@ public final class MainActivity extends Activity {
                 return true;
             }
             @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                pageGeneration++;
+                cancelVoiceSession(true);
                 trustedGuiLoaded = false;
             }
             @Override public void onPageFinished(WebView view, String url) {
@@ -253,6 +280,7 @@ public final class MainActivity extends Activity {
             }
         });
         webView.addJavascriptInterface(new FileDownloads(), "DAXQOFiles");
+        webView.addJavascriptInterface(new VoiceBridge(), "DAXQOVoice");
         webView.setVisibility(View.GONE);
         root.addView(webView, new LinearLayout.LayoutParams(-1, 0, 1));
         if (Build.VERSION.SDK_INT >= 35) {
@@ -350,6 +378,110 @@ public final class MainActivity extends Activity {
         catch (Exception ignored) { Toast.makeText(this, "无法打开此链接", Toast.LENGTH_SHORT).show(); }
     }
 
+    private boolean mayUseVoice() {
+        if (isFinishing() || isDestroyed() || visibleActivity != this || !trustedGuiLoaded
+                || webView == null || webView.getVisibility() != View.VISIBLE) return false;
+        try { return isGuiUrl(Uri.parse(webView.getUrl())); }
+        catch (Exception ignored) { return false; }
+    }
+
+    private boolean isTrustedGuiVisible() {
+        if (isFinishing() || isDestroyed() || visibleActivity != this || !trustedGuiLoaded
+                || webView == null || webView.getVisibility() != View.VISIBLE) return false;
+        try { return isGuiUrl(Uri.parse(webView.getUrl())); }
+        catch (Exception ignored) { return false; }
+    }
+
+    private void startVoice(String sessionId) {
+        if (sessionId == null || sessionId.isEmpty() || sessionId.length() > 128) {
+            emitVoiceEvent("error", null, "语音会话无效", sessionId);
+            return;
+        }
+        if (!mayUseVoice()) {
+            emitVoiceEvent("error", null, "当前页面暂不可使用语音输入", sessionId);
+            return;
+        }
+        if (voicePermissionPending || (voiceInput != null && voiceInput.isListening())) return;
+        VoiceInputController.Availability availability = VoiceInputController.getAvailability(this);
+        if (availability == VoiceInputController.Availability.NO_SERVICE) {
+            emitVoiceEvent("error", null, "此设备没有可用的语音识别服务", sessionId);
+            return;
+        }
+        if (availability == VoiceInputController.Availability.SYSTEM_SERVICE) {
+            if (!shownSystemRecognitionNotice) {
+                Toast.makeText(this, "使用系统语音识别，可能联网", Toast.LENGTH_LONG).show();
+                shownSystemRecognitionNotice = true;
+            }
+        } else {
+            Toast.makeText(this, "本机语音识别", Toast.LENGTH_SHORT).show();
+        }
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            voicePermissionPending = true;
+            pendingVoiceSession = sessionId;
+            pendingVoicePage = pageGeneration;
+            requestPermissions(new String[] {android.Manifest.permission.RECORD_AUDIO}, VOICE_PERMISSION_REQUEST);
+            return;
+        }
+        activeVoiceSession = sessionId;
+        voiceInput.start();
+    }
+
+    private void stopVoice() {
+        if (voiceInput != null && voiceInput.isListening()) voiceInput.stop();
+    }
+
+    private void cancelVoiceSession(boolean notify) {
+        String sessionId = activeVoiceSession != null ? activeVoiceSession : pendingVoiceSession;
+        boolean hadSession = voicePermissionPending || (voiceInput != null && voiceInput.isListening());
+        voicePermissionPending = false;
+        pendingVoiceSession = null;
+        activeVoiceSession = null;
+        if (voiceInput != null) voiceInput.cancel();
+        if (notify && hadSession && sessionId != null) {
+            emitVoiceEvent("cancelled", null, null, sessionId);
+        }
+    }
+
+    private void emitVoiceEvent(String type, String text, String message, String sessionId) {
+        if (sessionId == null || webView == null || isDestroyed()) return;
+        JSONObject event = new JSONObject();
+        try {
+            event.put("type", type);
+            if (text != null) event.put("text", text);
+            if (message != null) event.put("message", message);
+            event.put("sessionId", sessionId);
+        } catch (org.json.JSONException ignored) { return; }
+        String script = "window.daxqoVoiceEvent&&window.daxqoVoiceEvent(" + event + ")";
+        runOnUiThread(() -> {
+            if (mayUseVoice()) webView.evaluateJavascript(script, null);
+        });
+    }
+
+    private final class VoiceBridge {
+        @JavascriptInterface public void start(String sessionId) {
+            runOnUiThread(() -> startVoice(sessionId));
+        }
+        @JavascriptInterface public void stop() { runOnUiThread(MainActivity.this::stopVoice); }
+        @JavascriptInterface public void cancel() { runOnUiThread(() -> cancelVoiceSession(true)); }
+    }
+
+    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != VOICE_PERMISSION_REQUEST) return;
+        String sessionId = pendingVoiceSession;
+        boolean samePage = pendingVoicePage == pageGeneration;
+        voicePermissionPending = false;
+        pendingVoiceSession = null;
+        if (sessionId == null) return;
+        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED
+                && samePage && mayUseVoice()) {
+            activeVoiceSession = sessionId;
+            voiceInput.start();
+        } else {
+            emitVoiceEvent("error", null, "未授予麦克风权限，无法使用语音输入", sessionId);
+        }
+    }
+
     private boolean isCredentialParameter(String key) {
         return key.equals("key") || key.endsWith("key") || key.endsWith("keyid")
                 || key.contains("token") || key.contains("capability") || key.contains("secret")
@@ -383,12 +515,20 @@ public final class MainActivity extends Activity {
         private static final long MAX_BYTES = 20L * 1024L * 1024L;
 
         @JavascriptInterface public boolean downloadFile(String relativePath) {
+            return queueDownload(relativePath, false);
+        }
+
+        @JavascriptInterface public boolean openFile(String relativePath) {
+            return queueDownload(relativePath, true);
+        }
+
+        private boolean queueDownload(String relativePath, boolean openAfterSave) {
             if (!trustedGuiLoaded || !isSafeRelativePath(relativePath)) return false;
             String capability = getSharedPreferences(PREFS, MODE_PRIVATE).getString(CAP_KEY, null);
             if (capability == null) return false;
             io.execute(() -> {
-                boolean saved = saveFile(relativePath, capability);
-                runOnUiThread(() -> Toast.makeText(MainActivity.this,
+                boolean saved = saveFile(relativePath, capability, openAfterSave);
+                if (!openAfterSave || !saved) runOnUiThread(() -> Toast.makeText(MainActivity.this,
                         saved ? "文件已保存到下载目录" : "文件下载失败或超过 20 MB 限制", Toast.LENGTH_LONG).show());
             });
             return true;
@@ -409,7 +549,7 @@ public final class MainActivity extends Activity {
             return true;
         }
 
-        private boolean saveFile(String relativePath, String capability) {
+        private boolean saveFile(String relativePath, String capability, boolean openAfterSave) {
             HttpURLConnection connection = null;
             Uri inserted = null;
             File legacyFile = null;
@@ -469,12 +609,36 @@ public final class MainActivity extends Activity {
                     ready.put(MediaStore.Downloads.IS_PENDING, 0);
                     getContentResolver().update(inserted, ready, null, null);
                 }
+                if (openAfterSave) {
+                    Uri openUri = inserted;
+                    String openMime = mime;
+                    runOnUiThread(() -> openSavedFile(openUri, openMime));
+                }
                 return true;
             } catch (Exception ignored) {
                 if (inserted != null) getContentResolver().delete(inserted, null, null);
                 if (legacyFile != null) legacyFile.delete();
                 return false;
             } finally { if (connection != null) connection.disconnect(); }
+        }
+
+        private void openSavedFile(Uri uri, String mime) {
+            if (!isTrustedGuiVisible()) {
+                Toast.makeText(MainActivity.this, "文件已保存到下载目录", Toast.LENGTH_LONG).show();
+                return;
+            }
+            if (uri == null) {
+                Toast.makeText(MainActivity.this, "已保存到下载目录，请在文件管理器打开", Toast.LENGTH_LONG).show();
+                return;
+            }
+            Intent view = new Intent(Intent.ACTION_VIEW);
+            view.setDataAndType(uri, mime == null ? "application/octet-stream" : mime);
+            view.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try {
+                startActivity(view);
+            } catch (Exception noViewer) {
+                Toast.makeText(MainActivity.this, "已保存到下载目录，请安装相应阅读应用", Toast.LENGTH_LONG).show();
+            }
         }
 
         private String safeFilename(String relativePath, String disposition) {
@@ -502,6 +666,8 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        cancelVoiceSession(false);
+        if (voiceInput != null) { voiceInput.destroy(); voiceInput = null; }
         if (visibleActivity == this) visibleActivity = null;
         if (fileChooserCallback != null) {
             fileChooserCallback.onReceiveValue(null);

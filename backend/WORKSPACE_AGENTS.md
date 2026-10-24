@@ -10,6 +10,8 @@ For long tasks, keep necessary progress, evidence, and next steps in workspace f
 
 本机 Python 3、Node 和 shell 可用。输出文件默认放在当前工作区；供用户查看的成果可以复制到 `/sdcard/Download/phone-harness/`。不要把凭据、登录令牌或整个环境变量写入回复、公共下载目录或任务日志。
 
+最终回复用工作区相对 Markdown 链接列出本次交付的文件或成果目录，供 GUI 打开和邮件附加。用户指定其他保存位置时保留工作区副本；不要列入无关文件或私有运行数据。
+
 Local Python 3, Node, and a shell are available. Save output files in the current workspace by default; user-facing artifacts may be copied to `/sdcard/Download/phone-harness/`. Never put credentials, login tokens, or the full environment into replies, public download directories, or task logs.
 
 使用已有本地服务前先阅读对应说明，遵守用户授权范围。发布、群发或其他面向他人的外部写入需要用户明确要求。不得读取或输出无关服务的私有凭据。

@@ -1,5 +1,6 @@
 """Protocol, persistence, and HTTP boundary tests using a local fake subprocess fixture."""
 import json
+import base64
 import os
 import socket
 import subprocess
@@ -795,7 +796,7 @@ for line in sys.stdin:
             with urllib.request.urlopen(req) as response:
                 result = json.loads(response.read())
                 self.assertTrue(result["engine"]["connected"])
-                self.assertEqual(result["app"], {"name":"DAXQO", "version":"0.5.0"})
+                self.assertEqual(result["app"], {"name":"DAXQO", "version":"0.6.0"})
         finally:
             http.shutdown(); http.server_close()
 
@@ -1195,6 +1196,10 @@ for line in sys.stdin:
         text_path.write_bytes(text.encode("utf-8"))
         binary = b"fixture\x00download"
         (workspace / "result.bin").write_bytes(binary)
+        png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6e1QAAAAASUVORK5CYII=")
+        (workspace / "chart.png").write_bytes(png)
+        (workspace / "active.svg").write_text('<svg onload="alert(1)"></svg>', encoding="utf-8")
+        (workspace / "fake.png").write_text('<html>not an image</html>', encoding="utf-8")
         private = workspace / "state" / "private"
         private.mkdir(parents=True)
         (private / "provider.json").write_text('{"apiKey":"fixture-secret"}', encoding="utf-8")
@@ -1212,6 +1217,19 @@ for line in sys.stdin:
             self.assertEqual(listing["path"], "")
             self.assertTrue(any(item["path"] == "smoke-test" and item["isDirectory"] for item in listing["files"]))
             self.assertFalse(any("provider.json" in item["path"] for item in listing["files"]))
+            self.assertTrue(next(item for item in listing["files"] if item["path"] == "chart.png")["isImage"])
+            query = urllib.parse.urlencode({"path": "chart.png"})
+            with get("/api/files/preview?" + query) as response:
+                self.assertEqual(response.headers["Content-Type"], "image/png")
+                self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+                self.assertEqual(response.read(), png)
+            with self.assertRaises(urllib.error.HTTPError) as denied:
+                urllib.request.urlopen(base + "/api/files/preview?" + query, timeout=2)
+            self.assertEqual(denied.exception.code, 401)
+            for name in ("active.svg", "fake.png", "state/private/provider.json", "../outside.png"):
+                with self.assertRaises(urllib.error.HTTPError) as denied:
+                    get("/api/files/preview?" + urllib.parse.urlencode({"path": name}))
+                self.assertIn(denied.exception.code, (400, 404))
             query = urllib.parse.urlencode({"path":"smoke-test/report.md"})
             with get("/api/files/text?" + query) as response:
                 document = json.loads(response.read())

@@ -24,6 +24,7 @@ import time
 import uuid
 
 from remote_protocol import mail_payload_text, normalize_email, sign, verify
+from artifacts import MAX_ARTIFACTS, MAX_FILE_BYTES
 
 MAX_MESSAGE = 96 * 1024
 MAX_JSON = 64 * 1024
@@ -254,6 +255,7 @@ class MailControlService:
                 if name not in command_columns: self.store.db.execute(f"ALTER TABLE mail_commands ADD COLUMN {name} {definition}")
             self.store.db.execute("CREATE TABLE IF NOT EXISTS mail_receipts (id TEXT PRIMARY KEY,contact_id TEXT NOT NULL,contact_email TEXT NOT NULL,subject TEXT NOT NULL,status TEXT NOT NULL,reason TEXT NOT NULL,received_at TEXT NOT NULL,header_hash TEXT NOT NULL UNIQUE)")
             self.store.db.execute("CREATE TABLE IF NOT EXISTS mail_approval_notices (approval_id TEXT PRIMARY KEY,task_id TEXT NOT NULL,contact_id TEXT NOT NULL,command_id TEXT NOT NULL UNIQUE,status TEXT NOT NULL,created_at TEXT NOT NULL)")
+            self.store.db.execute("CREATE TABLE IF NOT EXISTS mail_reply_parts (command_id TEXT NOT NULL,part INTEGER NOT NULL,parts INTEGER NOT NULL,message_id TEXT NOT NULL,status TEXT NOT NULL,attachment_count INTEGER NOT NULL DEFAULT 0,sent_at TEXT,PRIMARY KEY(command_id,part),FOREIGN KEY(command_id) REFERENCES mail_commands(id))")
             receipt_columns = {row[1] for row in self.store.db.execute("PRAGMA table_info(mail_receipts)")}
             if "task_id" not in receipt_columns: self.store.db.execute("ALTER TABLE mail_receipts ADD COLUMN task_id TEXT")
         with self.store.lock, self.store.db:
@@ -261,6 +263,8 @@ class MailControlService:
             self.store.db.execute("UPDATE mail_commands SET status='reply_uncertain',error='Backend restarted during reply send' WHERE status='replying'")
             self.store.db.execute("UPDATE mail_approval_notices SET status='reply_uncertain' WHERE status='sending'")
             self.store.db.execute("UPDATE mail_commands SET ack_status='uncertain' WHERE ack_status='sending'")
+            self.store.db.execute("UPDATE mail_reply_parts SET status='uncertain' WHERE status='sending'")
+            self.store.db.execute("UPDATE mail_reply_parts SET status='not_sent' WHERE status='pending'")
         self.last_error = None
         self._config = self._read_config()
         self._harden_store_files()
@@ -985,6 +989,9 @@ class MailControlService:
                     if cursor.rowcount != 1: return
             except Exception:
                 return
+        self._deliver_reply_parts(command_id, contact, report, config)
+
+    def _reply_message(self, command_id, config, contact, report):
         with self.store.lock:
             row = self.store.db.execute("SELECT transport FROM mail_commands WHERE id=?", (command_id,)).fetchone()
         if row and row["transport"] == "plain":
@@ -1006,6 +1013,9 @@ class MailControlService:
             if report.get("result"): lines += ["", str(report["result"])]
             if report.get("error"): lines += ["", "处理说明：" + str(report["error"])]
             if report.get("truncated"): lines += ["", "报告已节选，完整内容请在手机 DAXQO 对话中查看。"]
+            if report.get("parts"):
+                lines += ["", f"成果邮件：第 {report['part']}/{report['parts']} 封"]
+            if report.get("attachmentNotes"): lines += ["", report["attachmentNotes"]]
             message = self._plain_message(command_id, config, contact, "达氙任务报告：", "\n".join(lines))
         else:
             payload = sign({"v": 1, "action": "result", "contact": contact["email"], "nonce": uuid.uuid4().hex,
@@ -1016,15 +1026,108 @@ class MailControlService:
             message["Subject"] = "DAXQO/1 " + payload["nonce"]
             message["Message-ID"] = make_msgid()
             message.set_content(mail_payload_text(payload), subtype="plain", charset="utf-8", cte="base64")
+        return message
+
+    def _attachment_groups(self, report, contact):
+        groups, group, total, notes = [], [], 0, []
+        task_id = report.get("taskId")
+        collector = getattr(self.harness, "result_artifacts", None)
+        if report.get("status") not in ("completed", "failed", "stopped", "interrupted", "cancelled") or not task_id or not callable(collector):
+            return [[]], notes
+        with self.store.lock:
+            owned = self.store.db.execute("SELECT 1 FROM mail_commands WHERE contact_id=? AND action='submit' AND task_id=?", (contact["id"], task_id)).fetchone()
+        task = self.store.row(task_id) if owned else None
+        if not task: return [[]], notes
+        files = collector(task.get("result") or "", expand_dirs=True)
+        for item in files:
+            if item.get("isDirectory"): continue
+            size = item.get("size", -1)
+            if not isinstance(size, int) or size < 0 or size > MAX_FILE_BYTES:
+                notes.append("有文件超过 20 MB，未作为附件发送；请在手机文件页查看。")
+                continue
+            if group and total + size > MAX_FILE_BYTES:
+                groups.append(group); group, total = [], 0
+            group.append(item); total += size
+        if group: groups.append(group)
+        if len(files) >= MAX_ARTIFACTS:
+            notes.append(f"本次最多处理 {MAX_ARTIFACTS} 个成果文件，其余请在手机文件页查看。")
+        return groups or [[]], list(dict.fromkeys(notes))
+
+    def _deliver_reply_parts(self, command_id, contact, report, config):
         try:
-            self._transmit(config, contact, message)
-            outcome = report.get("status") if report.get("status") in ("rejected", "failed") else "completed"
-            self._finish_command(command_id, outcome, None, replied=True)
-        except PermissionError:
-            self._finish_command(command_id, "interrupted", "邮箱设置或联系人授权已变化")
+            groups, notes = self._attachment_groups(report, contact)
+            with self.store.lock, self.store.db:
+                for index, group in enumerate(groups, 1):
+                    self.store.db.execute("INSERT INTO mail_reply_parts(command_id,part,parts,message_id,status,attachment_count) VALUES(?,?,?,?,?,?)",
+                        (command_id, index, len(groups), make_msgid(), "pending", len(group)))
         except Exception:
-            # Do not retry: the server may have accepted the message before the error.
-            self._finish_command(command_id, "reply_uncertain", "回复邮件状态不确定")
+            self._finish_command(command_id, "failed", "无法准备成果邮件，未自动重发")
+            return
+        with self._auth_lock, self.store.lock:
+            secrets_to_block = [config.get("password"), (getattr(self.harness, "provider", None) or {}).get("apiKey")]
+            secrets_to_block += [row[0] for row in self.store.db.execute("SELECT secret FROM mail_contacts")]
+        private_bytes = [value.encode("utf-8") for value in secrets_to_block if isinstance(value, str) and value]
+        confirmed = 0
+        for index, group in enumerate(groups, 1):
+            attachments, part_notes, used_names = [], list(notes), set()
+            for item in group:
+                try:
+                    relative, raw = self.harness.read_workspace_download(item["path"])
+                    current, _ = self.harness.resolve_workspace_path(relative)
+                    if len(raw) != item["size"] or current.stat().st_mtime_ns != item.get("modifiedAt"):
+                        raise ValueError("Artifact changed since result discovery")
+                    name = "".join(ch for ch in item["name"] if ch >= " " and ch not in '/\\')[:180] or "result"
+                    if any(value in raw or value in name.encode("utf-8") for value in private_bytes):
+                        part_notes.append("含有本机凭据的文件未通过邮件发送。")
+                        continue
+                    unique, counter = name, 1
+                    while unique.casefold() in used_names:
+                        counter += 1
+                        unique = f"{Path(name).stem}_{counter}{Path(name).suffix}"
+                    used_names.add(unique.casefold())
+                    attachments.append((unique, item.get("mime") or "application/octet-stream", raw))
+                except (OSError, ValueError, OverflowError, KeyError):
+                    part_notes.append("有成果文件已更改、不可读取或超过 20 MB，未附加；请在手机文件页查看。")
+            part_report = dict(report)
+            if attachments or part_notes or len(groups) > 1:
+                part_report.update(part=index, parts=len(groups))
+                manifest = [{"name": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+                            for name, _, raw in attachments]
+                part_report["attachments"] = {"count": len(manifest), "bytes": sum(item["size"] for item in manifest),
+                    "manifestSha256": hashlib.sha256(_safe_json(manifest)).hexdigest()}
+                if part_notes: part_report["attachmentNotes"] = "\n".join(dict.fromkeys(part_notes))
+            sending = False
+            try:
+                message = self._reply_message(command_id, config, contact, self._bounded_report(part_report))
+                with self.store.lock:
+                    part = self.store.db.execute("SELECT message_id FROM mail_reply_parts WHERE command_id=? AND part=?", (command_id, index)).fetchone()
+                message.replace_header("Message-ID", part["message_id"])
+                if len(groups) > 1: message.replace_header("Subject", str(message["Subject"]) + f" [{index}/{len(groups)}]")
+                for name, mime, raw in attachments:
+                    major, _, minor = mime.partition("/")
+                    message.add_attachment(raw, maintype=major, subtype=minor or "octet-stream", filename=name)
+                with self.store.lock, self.store.db:
+                    self.store.db.execute("UPDATE mail_reply_parts SET status='sending',attachment_count=? WHERE command_id=? AND part=?",
+                                          (len(attachments), command_id, index))
+                sending = True
+                self._transmit(config, contact, message)
+                confirmed += 1
+                with self.store.lock, self.store.db:
+                    self.store.db.execute("UPDATE mail_reply_parts SET status='sent',sent_at=? WHERE command_id=? AND part=?", (_stamp(), command_id, index))
+                # Release MIME/base64 and raw bytes before preparing the next batch.
+                del message, attachments
+            except Exception as exc:
+                revoked = isinstance(exc, PermissionError)
+                state = "disabled" if revoked else ("uncertain" if sending else "not_sent")
+                with self.store.lock, self.store.db:
+                    self.store.db.execute("UPDATE mail_reply_parts SET status=? WHERE command_id=? AND part=?", (state, command_id, index))
+                    self.store.db.execute("UPDATE mail_reply_parts SET status='not_sent' WHERE command_id=? AND status='pending'", (command_id,))
+                status = "interrupted" if revoked else ("reply_uncertain" if sending else "failed")
+                reason = "邮箱设置或联系人授权已变化" if revoked else ("回复邮件状态不确定" if sending else "无法准备成果邮件")
+                self._finish_command(command_id, status, f"{reason}；已确认发送 {confirmed}/{len(groups)} 封，未自动重发")
+                return
+        outcome = report.get("status") if report.get("status") in ("rejected", "failed") else "completed"
+        self._finish_command(command_id, outcome, None, replied=True)
 
     def _plain_message(self, command_id, config, contact, prefix, text):
         with self.store.lock:
@@ -1050,6 +1153,8 @@ class MailControlService:
                     active = self.store.db.execute("SELECT 1 FROM mail_contacts WHERE id=? AND email=? AND enabled=1 AND deleted_at IS NULL", (contact["id"], contact["email"])).fetchone()
                 if not active or not self._config.get("enabled") or config != self._config:
                     raise PermissionError("邮箱设置或联系人授权已变化")
+                if getattr(smtp, "sock", None) is not None:
+                    smtp.sock.settimeout(120)  # Large attachments need more time than a text-only reply.
                 smtp.send_message(message)
 
     def _send_plain_ack(self, command_id, contact, task_id):

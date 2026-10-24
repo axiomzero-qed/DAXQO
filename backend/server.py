@@ -30,6 +30,7 @@ from task_services import TaskServices
 from email_control import MailControlService
 from android_mcp_server import AndroidBridge, BridgeError
 from agent_context import PhoneContext
+from artifacts import file_type, image_type, read_file, referenced_files
 
 RPC_TIMEOUT = 30.0
 MAX_BODY = 1024 * 1024
@@ -60,6 +61,8 @@ input sends complete Unicode text in one args.text, including Chinese/newlines/e
 For installation use the user's named store; otherwise open android_status.preferredAppStore, the device's built-in store, with open_app args.packageName. appStores is ordered with OEM stores first and third-party stores last. If an older status omits the built-in store, look for its observed launcher icon once. Use 应用宝 only when the built-in store actually lacks the app or fails. Enter the exact app name, submit with the visible search/keyboard Search control, and verify real app rows with Install/Open controls; keyword suggestions alone are not results. Match the requested app, not an advertisement. Wait for install progress, then verify an installed/Open state or launch. Do not switch to web/APK downloads unless the user asks for that fallback.
 
 Handle permission dialogs only when they appear and affect this task. Skip/稍后/拒绝 unrelated optional notifications, promotions or contact access; do not visit settings to audit permissions that are already working. For a necessary routine permission within the user's request, choose the narrowest suitable option once (e.g. while using the app) and continue. Do not deliberate about hypothetical restrictions or repeatedly reconfirm the same decision. Treat DAXQO policy and Android restrictions as actual tool results: full mode attempts authorized actions directly; confirm mode may return approval_required. On approval_required report the specific action and approval ID, then end the turn: owner GUI/authenticated email resumes the task. Never approve yourself, change control mode, or bypass consent with shell/adb. On needs_user/control_disabled stop and state the required owner action. If screen-off/non-secure locked, try wake; never bypass secure keyguard, verification or protected windows.
+
+Save deliverables in the workspace and link each intended output file or directory in the final reply with a workspace-relative Markdown link so the GUI and email can surface it. If the user requests another location, keep a workspace copy for delivery. Do not link unrelated files or private runtime data.
 
 After a timeout observe/check status before another write; two consecutive timeout/unavailable results end that path with a precise blocker. For other failures, use the reported error to correct parameters/target once instead of exploring unrelated workarounds. Retain completed work, change an ineffective approach, and report verified results and any remaining scope honestly."""
 
@@ -861,7 +864,7 @@ class Harness:
         return {"activity": {"phase": phase, "lastEventAt": created, "elapsedSeconds": elapsed,
                              "quietSeconds": quiet, "summary": self.safe_text(summary, 300)},
                 "context": context, "agents": list(agent_rows.values()),
-                "progress": events,
+                "progress": events, "artifacts": self.result_artifacts(row.get("result") or ""),
                 **({"liveMessage": self.safe_text(latest_live, 2000)} if latest_live else {})}
 
     def _save_provider_file(self) -> None:
@@ -995,8 +998,10 @@ class Harness:
                 is_directory = stat.S_ISDIR(mode)
                 if not is_directory and not stat.S_ISREG(mode): continue
                 rel = resolved.relative_to(root).as_posix() if entry.is_symlink() else entry.relative_to(root).as_posix()
+                mime, image = file_type(rel)
                 items.append({"name": entry.name, "path": rel, "size": 0 if is_directory else resolved.stat().st_size,
-                              "isDirectory": is_directory})
+                              "isDirectory": is_directory, "mime": "inode/directory" if is_directory else mime,
+                              "isImage": image and not is_directory, "modifiedAt": resolved.stat().st_mtime_ns})
             except (OSError, ValueError):
                 continue
         items.sort(key=lambda item: (not item["isDirectory"], item["name"].casefold()))
@@ -1014,13 +1019,22 @@ class Harness:
         return {"path": display_path, "text": text, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
 
     def read_workspace_download(self, relative: str) -> tuple[str, bytes]:
-        path, display_path = self.resolve_workspace_path(relative)
-        info = path.stat()
-        if not stat.S_ISREG(info.st_mode): raise ValueError("Path must be a regular file")
-        if info.st_size > MAX_DOWNLOAD_FILE: raise OverflowError("File exceeds 20 MiB")
-        raw = path.read_bytes()
-        if len(raw) > MAX_DOWNLOAD_FILE: raise OverflowError("File exceeds 20 MiB")
-        return display_path, raw
+        return read_file(self.resolve_workspace_path, relative, MAX_DOWNLOAD_FILE)
+
+    def result_artifacts(self, text: str, *, expand_dirs: bool = False) -> list[dict]:
+        try: return referenced_files(text, self.workspace, self.resolve_workspace_path, expand_dirs=expand_dirs)
+        except OSError: return []
+
+    def task_messages(self, task_id: str) -> list[dict]:
+        messages = self.store.messages(task_id)
+        for message in messages:
+            if message.get("role") == "assistant":
+                message["artifacts"] = self.result_artifacts(message.get("text") or "")
+        return messages
+
+    def read_workspace_preview(self, relative: str) -> tuple[str, bytes]:
+        _, raw = self.read_workspace_download(relative)
+        return image_type(raw), raw
 
     def save_provider(self, body: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
@@ -1594,7 +1608,7 @@ class Harness:
         if e and e.account_error: account["error"] = e.account_error
         active_rows = self.store.active_rows()
         active = next((r for r in active_rows if r["id"] == self.active_task_id), active_rows[0] if active_rows else None)
-        return {"app": {"name": "DAXQO", "version": "0.5.0"}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
+        return {"app": {"name": "DAXQO", "version": "0.6.0"}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
                 "engine": {"installed": bool(self.engine_path or self.engine), "version": e.version if e else None, "connected": bool(e and e.connected)},
                 "account": account, "activeTaskId": active["id"] if active else None, "activeTaskIds": [r["id"] for r in active_rows],
                 "workspace": str(self.workspace),
@@ -2091,6 +2105,22 @@ def create_handler(harness: Harness):
                 except OverflowError as exc: return self._json(413, {"error": str(exc)})
                 except ValueError as exc: return self._json(400, {"error": str(exc)})
                 except OSError: return self._json(404, {"error": "Not found"})
+            if path == "/api/files/preview":
+                try:
+                    mime, raw = harness.read_workspace_preview(query.get("path", [""])[0])
+                    self.send_response(200)
+                    self.send_header("Content-Type", mime)
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
+                    self.end_headers(); self.wfile.write(raw)
+                    return
+                except FileNotFoundError: return self._json(404, {"error": "Not found"})
+                except PermissionError: return self._json(400, {"error": "File access denied"})
+                except OverflowError as exc: return self._json(413, {"error": str(exc)})
+                except ValueError as exc: return self._json(400, {"error": str(exc)})
+                except OSError: return self._json(404, {"error": "Not found"})
             if path == "/api/files/download":
                 try:
                     filename, raw = harness.read_workspace_download(query.get("path", [""])[0])
@@ -2110,7 +2140,7 @@ def create_handler(harness: Harness):
             if path.startswith("/api/tasks/") and path.endswith("/messages"):
                 task_id = path.split("/")[3]
                 if not harness.store.row(task_id): return self._json(404, {"error": "Task not found"})
-                return self._json(200, {"messages": harness.store.messages(task_id)})
+                return self._json(200, {"messages": harness.task_messages(task_id)})
             if path.startswith("/api/tasks/"):
                 task_id = path.split("/")[3]
                 row = harness.store.row(task_id)
