@@ -5,11 +5,12 @@ public final class PlatformProfile {
     private static final String[] STANDARD_STORES = {
             "com.android.vending", "com.bbk.appstore", "com.heytap.market", "com.oppo.market",
             "com.huawei.appmarket", "com.sec.android.app.samsungapps", "com.xiaomi.market", "com.vivo.appstore",
-            "com.tencent.android.qqdownloader"
+            "com.stepos.appstore", "com.tencent.android.qqdownloader"
     };
     private static final String[] XM_STORES = {
             "com.xiaomi.market", "com.bbk.appstore", "com.vivo.appstore", "com.heytap.market",
-            "com.oppo.market", "com.huawei.appmarket", "com.sec.android.app.samsungapps", "com.android.vending"
+            "com.oppo.market", "com.huawei.appmarket", "com.sec.android.app.samsungapps", "com.android.vending",
+            "com.stepos.appstore", "com.tencent.android.qqdownloader"
     };
     public final String id;
     public final String setupGuidance;
@@ -27,4 +28,39 @@ public final class PlatformProfile {
         throw new IllegalArgumentException("Unknown platform profile: " + id);
     }
     public String[] appStoreCandidates() { return stores.clone(); }
+
+    /** Returns known OEM stores first, preserving the selected profile's order for all others. */
+    public String[] appStoreCandidates(String manufacturer) {
+        String[] preferred = preferredStores(manufacturer);
+        if (preferred.length == 0) return stores.clone();
+        java.util.ArrayList<String> ordered = new java.util.ArrayList<>();
+        for (String name : preferred) addIfPresent(ordered, name);
+        for (String name : stores) {
+            if (!"com.tencent.android.qqdownloader".equals(name)) addIfPresent(ordered, name);
+        }
+        addIfPresent(ordered, "com.tencent.android.qqdownloader");
+        return ordered.toArray(new String[0]);
+    }
+
+    private void addIfPresent(java.util.List<String> output, String name) {
+        for (String candidate : stores) {
+            if (candidate.equals(name)) {
+                if (!output.contains(name)) output.add(name);
+                return;
+            }
+        }
+    }
+
+    private static String[] preferredStores(String manufacturer) {
+        String name = manufacturer == null ? "" : manufacturer.toLowerCase(java.util.Locale.ROOT);
+        if (name.contains("stepx") || name.contains("stepos")) return new String[]{"com.stepos.appstore"};
+        if (name.contains("xiaomi") || name.contains("redmi") || name.contains("poco")) return new String[]{"com.xiaomi.market"};
+        if (name.contains("vivo")) return new String[]{"com.vivo.appstore", "com.bbk.appstore"};
+        if (name.contains("bbk")) return new String[]{"com.bbk.appstore", "com.vivo.appstore"};
+        if (name.contains("oppo") || name.contains("realme") || name.contains("oneplus")) return new String[]{"com.heytap.market", "com.oppo.market"};
+        if (name.contains("huawei")) return new String[]{"com.huawei.appmarket"};
+        if (name.contains("honor")) return new String[]{"com.huawei.appmarket"};
+        if (name.contains("samsung")) return new String[]{"com.sec.android.app.samsungapps"};
+        return new String[0];
+    }
 }

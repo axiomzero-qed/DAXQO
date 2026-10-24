@@ -1,7 +1,9 @@
 package io.daxqo.app;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.GestureDescription;
+import android.accessibilityservice.InputMethod;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -20,6 +22,8 @@ import android.util.Base64;
 import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.inputmethod.EditorInfo;
+import android.text.InputType;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
@@ -52,6 +56,11 @@ public final class DeviceAccessibilityService extends AccessibilityService {
 
     @Override protected void onServiceConnected() {
         super.onServiceConnected();
+        if (Build.VERSION.SDK_INT >= 33) {
+            AccessibilityServiceInfo info = getServiceInfo();
+            info.flags |= AccessibilityServiceInfo.FLAG_INPUT_METHOD_EDITOR;
+            setServiceInfo(info);
+        }
         DeviceState.approvals.revoke();
         current = this;
         bridge = new DeviceHttpBridge(this);
@@ -79,6 +88,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         super.onDestroy();
     }
     boolean bridgeListening() { return bridge != null && bridge.isListening(); }
+    boolean cursorInputMethodSupported() { return Build.VERSION.SDK_INT >= 33 && getInputMethod() != null; }
 
     void refreshNotification() {
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
@@ -298,7 +308,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         if (ControlActivity.visible) return failure(id, "control_ui_local_only", "本机控制页只接受你亲自操作，请返回目标应用后重试");
         if (ownerConfirmationUi()) return failure(id, "owner_confirmation_ui", "当前是你确认操作的界面，手机工具不能自行批准");
         if (!DeviceState.requiresApproval(DeviceState.policyMode(this), action, reason)) return null;
-        String page = pageFingerprint("input".equals(action) && args.optString("nodeId", "").isEmpty());
+        String page = pageFingerprint("input".equals(action));
         if (page == null) return failure(id, "no_window", "当前没有可绑定的应用界面，请重新读取屏幕");
         Map<String, String> fields = new HashMap<>();
         java.util.Iterator<String> names = args.keys();
@@ -394,6 +404,11 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         try {
             JSONArray nodes = new JSONArray();
             fingerprintNode(root, "0", nodes, new int[] {0}, 0, bindInputFocus);
+            if (bindInputFocus && Build.VERSION.SDK_INT >= 33 && getInputMethod() != null) {
+                EditorInfo editor = getInputMethod().getCurrentInputEditorInfo();
+                if (editor != null) nodes.put(new JSONObject().put("editorPackage", editor.packageName)
+                        .put("editorField", editor.fieldId).put("editorType", editor.inputType));
+            }
             // Android may recreate the same app window after keyguard/wake.
             // Its runtime window id is not a page identity; retain all of the
             // package, visible content, controls and state binding instead.
@@ -414,7 +429,8 @@ public final class DeviceAccessibilityService extends AccessibilityService {
                 .put("bounds", bounds.flattenToString()).put("text", stableLabel(text)).put("description", stableLabel(description))
                 .put("clickable", node.isClickable()).put("editable", node.isEditable()).put("enabled", node.isEnabled())
                 .put("checked", node.isChecked()).put("selected", node.isSelected()).put("password", node.isPassword());
-        if (bindInputFocus) item.put("inputFocused", node.isFocused());
+        if (bindInputFocus) item.put("inputFocused", node.isFocused())
+                .put("selectionStart", node.getTextSelectionStart()).put("selectionEnd", node.getTextSelectionEnd());
         nodes.put(item);
         for (int i = 0; i < Math.min(node.getChildCount(), 200) && count[0] < 400; i++) {
             AccessibilityNodeInfo child = node.getChild(i);
@@ -479,26 +495,99 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         if (!accepted) callback.done(failure(id, "action_failed", "系统拒绝执行手势"));
     }
 
+    @android.annotation.SuppressLint("NewApi") // ime is non-null only on API 33+ below.
     private void input(String id, JSONObject args, Completion callback) throws Exception {
         Object raw = args.opt("text");
-        if (!(raw instanceof String) || ((String) raw).length() > 8000) { callback.done(failure(id, "invalid_args", "输入文本无效或超过8000字符")); return; }
+        Object rawMode = args.has("mode") ? args.opt("mode") : "insert";
+        if (!(raw instanceof String) || !TextInputEdit.validText((String) raw)
+                || !(rawMode instanceof String) || !("insert".equals(rawMode) || "replace".equals(rawMode))) {
+            callback.done(failure(id, "invalid_args", "请输入有效Unicode文本（最多8000个UTF-16单元），mode须为insert或replace")); return;
+        }
+        String mode = (String) rawMode;
+        args.put("mode", mode);
+        String nodeId = args.optString("nodeId", "");
+        if ((args.has("nodeId") || args.has("snapshotId")) && (!(args.opt("nodeId") instanceof String)
+                || nodeId.isEmpty() || nodeId.length() > 255 || !(args.opt("snapshotId") instanceof String)
+                || args.optString("snapshotId").isEmpty() || args.optString("snapshotId").length() > 255)) {
+            callback.done(failure(id, "invalid_args", "指定输入节点时需要有效nodeId和snapshotId")); return;
+        }
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) { callback.done(failure(id, "no_window", "当前应用没有可用界面")); return; }
         AccessibilityNodeInfo node = null;
         try {
-            String nodeId = args.optString("nodeId", "");
             if (nodeId.isEmpty()) node = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
             else {
                 if (!snapshotId.equals(args.optString("snapshotId", "")) || !snapshotPackage.equals(foregroundPackage())) { callback.done(failure(id, "stale_snapshot", "界面快照已失效，请重新读取UI树")); return; }
                 node = nodeAt(root, nodeId);
+                if (nodeSnapshot == null || node == null || verifiedTarget(node, nodeId, args.optString("snapshotId"),
+                        foregroundPackage(), screenSize()) == null) {
+                    callback.done(failure(id, "stale_snapshot", "输入目标已变化，请重新读取UI树")); return;
+                }
             }
-            if (node == null || !node.isEditable()) { callback.done(failure(id, "no_input", "请先点击可编辑输入框")); return; }
-            JSONObject blocked = authorizeMutation(id, "input", args, node.isPassword() ? "向密码输入框填入文本" : sensitiveReason());
+            String packageName = value(root.getPackageName(), 200);
+            if (node != null && (!node.isEnabled() || !node.isVisibleToUser())) {
+                callback.done(failure(id, "no_input", "目标输入框不可用，请重新观察")); return;
+            }
+            InputMethod ime = Build.VERSION.SDK_INT >= 33 ? getInputMethod() : null;
+            EditorInfo editor = ime == null ? null : ime.getCurrentInputEditorInfo();
+            InputMethod.AccessibilityInputConnection connection = ime == null ? null : ime.getCurrentInputConnection();
+            // A virtual editor may expose a valid input connection without an
+            // editable accessibility node (e.g. WebView/contenteditable).
+            boolean direct = "insert".equals(mode) && ime != null && ime.getCurrentInputStarted()
+                    && connection != null && editor != null && packageName.equals(editor.packageName)
+                    && editor.inputType != InputType.TYPE_NULL && (node == null ? nodeId.isEmpty() : node.isFocused());
+            if (!direct && (node == null || !node.isEditable() || !node.isEnabled() || !node.isVisibleToUser())) {
+                callback.done(failure(id, "no_input", "未找到可写入的编辑器，请先点击目标输入框并重新观察；不要逐键拼音输入")); return;
+            }
+            JSONObject blocked = authorizeMutation(id, "input", args,
+                    (node != null && node.isPassword()) || editorPassword(editor) ? "向密码输入框填入文本" : sensitiveReason());
             if (blocked != null) { callback.done(blocked); return; }
-            Bundle value = new Bundle(); value.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, (String) raw);
-            boolean ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, value);
-            callback.done(ok ? success(id, new JSONObject().put("performed", true)) : failure(id, "action_failed", "应用未接受文本输入"));
+            if (!packageName.equals(foregroundPackage())) { callback.done(failure(id, "foreground_changed", "输入时前台应用已变化，请重新观察")); return; }
+            if (direct) {
+                if (ime.getCurrentInputEditorInfo() != editor || !ime.getCurrentInputStarted()
+                        || (node != null && (!node.refresh() || !node.isFocused()))) {
+                    callback.done(failure(id, "input_focus_changed", "输入焦点已变化，未提交文本；请重新观察")); return;
+                }
+                // commitText replaces an active composing span/selection and
+                // accepts full Unicode without switching IME or a clipboard.
+                // This API is asynchronous: never fall back after dispatch,
+                // which could type the same text twice. Observe the result.
+                connection.commitText((String) raw, 1, null);
+                invalidateSnapshot();
+                callback.done(success(id, new JSONObject().put("submitted", true).put("mode", mode)
+                        .put("method", "input_connection").put("verificationRequired", true)));
+                return;
+            }
+            if ("insert".equals(mode) && node.isPassword()) {
+                callback.done(failure(id, "input_unavailable", "当前密码框无法安全保留原文插入，请使用支持光标输入的系统或明确选择整框替换")); return;
+            }
+            TextInputEdit edit;
+            try {
+                edit = TextInputEdit.plan(node.getText() == null ? null : node.getText().toString(),
+                        node.getTextSelectionStart(), node.getTextSelectionEnd(), (String) raw, mode);
+            } catch (IllegalArgumentException unavailable) {
+                callback.done(failure(id, "selection_unavailable", "无法确认当前光标或选区，未改写原文；请先点击输入框并重新观察")); return;
+            }
+            Bundle value = new Bundle(); value.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, edit.text);
+            if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, value)) {
+                callback.done(failure(id, "input_unavailable", "应用未接受直接文本输入，请重新观察目标；不要逐键点按键盘")); return;
+            }
+            Bundle selection = new Bundle();
+            selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, edit.cursor);
+            selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, edit.cursor);
+            boolean cursorSet = node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selection);
+            invalidateSnapshot();
+            callback.done(success(id, new JSONObject().put("performed", true).put("mode", mode)
+                    .put("method", "accessibility_set_text").put("cursorSet", cursorSet).put("verificationRequired", true)));
         } finally { if (node != null) node.recycle(); root.recycle(); }
+    }
+    private void invalidateSnapshot() { nodeSnapshot = null; snapshotId = ""; snapshotPackage = ""; }
+    private static boolean editorPassword(EditorInfo editor) {
+        if (editor == null) return false;
+        int type = editor.inputType & InputType.TYPE_MASK_CLASS, variation = editor.inputType & InputType.TYPE_MASK_VARIATION;
+        return type == InputType.TYPE_CLASS_NUMBER && variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD
+                || type == InputType.TYPE_CLASS_TEXT && (variation == InputType.TYPE_TEXT_VARIATION_PASSWORD
+                || variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD || variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD);
     }
     private NodeSnapshot captureNodes(String ident, String packageName, JSONArray nodes) {
         ArrayList<NodeSnapshot.Node> items = new ArrayList<>();
@@ -622,6 +711,8 @@ public final class DeviceAccessibilityService extends AccessibilityService {
                 .put("bounds", new JSONArray().put(bounds.left).put(bounds.top).put(bounds.right).put(bounds.bottom))
                 .put("clickable", node.isClickable()).put("editable", node.isEditable()).put("scrollable", node.isScrollable())
                 .put("enabled", node.isEnabled()).put("visible", node.isVisibleToUser()).put("password", password);
+        item.put("focused", node.isFocused());
+        if (!password && node.isEditable()) item.put("selectionStart", node.getTextSelectionStart()).put("selectionEnd", node.getTextSelectionEnd());
         nodes.put(item);
         for (int i = 0; i < Math.min(node.getChildCount(), 200); i++) {
             AccessibilityNodeInfo child = node.getChild(i);

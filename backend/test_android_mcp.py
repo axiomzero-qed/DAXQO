@@ -168,14 +168,49 @@ class AndroidMCPTests(unittest.TestCase):
         self.assertTrue(target["clickable"])
         self.assertTrue(compact["truncated"])
 
+    def test_compact_tree_preserves_focused_unlabeled_node_and_safe_selection_metadata(self):
+        bounds = [0, 0, 100, 40]
+        nodes = [
+            {"id": "0", "parentId": "", "text": "Root", "bounds": [0, 0, 100, 2000], "visible": True},
+            {"id": "focus", "parentId": "0", "text": "", "description": "", "bounds": bounds,
+             "visible": True, "editable": True, "focused": True, "selectionStart": 1, "selectionEnd": 2},
+            {"id": "invalid-selection", "parentId": "0", "text": "Field", "bounds": bounds,
+             "visible": True, "editable": True, "selectionStart": True, "selectionEnd": -2},
+            {"id": "password", "parentId": "0", "text": "secret", "bounds": bounds,
+             "visible": True, "editable": True, "focused": True, "password": True,
+             "selectionStart": 1, "selectionEnd": 3},
+        ]
+        nodes.extend({"id": f"filler-{index}", "parentId": "0", "text": "x" * 160,
+                      "bounds": bounds, "visible": True} for index in range(50))
+        self.http.tree_result = {"snapshotId": "snap-input", "packageName": "example.app",
+                                 "width": 100, "height": 2000, "nodes": nodes}
+        response = self.server.call_tool("android_observe", {})
+        compact = json.loads(response["content"][0]["text"])["tree"]
+        by_id = {node["id"]: node for node in compact["nodes"]}
+        self.assertTrue(compact["truncated"])
+        self.assertEqual(by_id["focus"]["focused"], True)
+        self.assertEqual(by_id["focus"]["selectionStart"], 1)
+        self.assertEqual(by_id["focus"]["selectionEnd"], 2)
+        self.assertNotIn("selectionStart", by_id["invalid-selection"])
+        self.assertNotIn("selectionEnd", by_id["invalid-selection"])
+        self.assertTrue(by_id["password"]["focused"])
+        self.assertNotIn("selectionStart", by_id["password"])
+        self.assertNotIn("selectionEnd", by_id["password"])
+        self.assertNotIn("secret", json.dumps(compact))
+
     def test_raw_tree_remains_available_when_compact_false(self):
         self.http.tree_result = {"snapshotId": "snap-raw", "packageName": "example.app", "width": 10, "height": 10,
             "truncated": False, "nodes": [{"id": "0", "parentId": "", "text": "Raw", "viewId": "pkg:id/title",
-            "bounds": [0,0,10,10], "visible": True, "enabled": True}]}
+            "bounds": [0,0,10,10], "visible": True, "enabled": True},
+            {"id": "1", "parentId": "0", "text": "secret", "password": True,
+             "bounds": [0,0,10,10], "visible": True, "selectionStart": 1, "selectionEnd": 2}]}
         response = self.server.call_tool("android_observe", {"compact": False})
         tree = json.loads(response["content"][0]["text"])["tree"]
         self.assertEqual(tree["nodes"][0]["viewId"], "pkg:id/title")
         self.assertEqual(tree["nodes"][0]["enabled"], True)
+        self.assertNotIn("selectionStart", tree["nodes"][1])
+        self.assertNotIn("selectionEnd", tree["nodes"][1])
+        self.assertEqual(tree["nodes"][1]["text"], "")
 
     def test_tap_node_requires_snapshot_identity_and_never_falls_back_to_coordinates(self):
         result = self.server.call_tool("android_action", {"action": "tap_node", "args": {
@@ -216,6 +251,56 @@ class AndroidMCPTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "invalid_args")
         self.assertEqual(self.http.actions, [])
 
+    def test_input_preserves_complete_unicode_and_defaults_to_insert(self):
+        text = "你好，世界\n第二行 😀"
+        result = self.server.call_tool("android_action", {"action": "input", "args": {"text": text}})
+        self.assertIn('"accepted":true', result["content"][0]["text"])
+        self.assertEqual(self.http.actions[-1]["args"], {"text": text, "mode": "insert"})
+
+    def test_swipe_uses_explicit_pixel_coordinates_and_native_duration(self):
+        args = {"x1": 600, "y1": 1800, "x2": 600, "y2": 700}
+        self.server.call_tool("android_action", {"action": "swipe", "args": args})
+        self.assertEqual(self.http.actions[-1]["args"], {**args, "durationMs": 350})
+        for duration in (50, 2000):
+            self.server.call_tool("android_action", {"action": "swipe", "args": {**args, "durationMs": duration}})
+            self.assertEqual(self.http.actions[-1]["args"]["durationMs"], duration)
+
+    def test_invalid_swipe_never_reaches_phone(self):
+        args = {"x1": 600, "y1": 1800, "x2": 600, "y2": 700}
+        for invalid in ({"direction": "up"}, {**args, "x1": float("nan")},
+                        *({**args, "durationMs": duration} for duration in (True, 49, 2001, 350.5))):
+            with self.subTest(args=invalid):
+                with self.assertRaises(mcp.BridgeError) as raised:
+                    self.server.call_tool("android_action", {"action": "swipe", "args": invalid})
+                self.assertEqual(raised.exception.code, "invalid_args")
+        self.assertEqual(self.http.actions, [])
+
+    def test_input_replace_mode_and_matching_node_reference_are_forwarded(self):
+        args = {"text": "替换内容", "mode": "replace", "nodeId": "0.1", "snapshotId": "snap-1"}
+        self.server.call_tool("android_action", {"action": "input", "args": args})
+        self.assertEqual(self.http.actions[-1]["args"], args)
+
+    def test_input_validates_mode_unicode_length_and_node_binding_before_write(self):
+        before = len(self.http.actions)
+        invalid_args = [
+            {"text": "x", "mode": "append"}, {"text": "x", "mode": 1},
+            {"text": "x", "mode": None}, {"text": "x", "text2": "ignored", "nodeId": ""},
+            {"text": "x", "nodeId": "n"}, {"text": "x", "snapshotId": "snap"},
+            {"text": "x", "nodeId": "n", "snapshotId": ""},
+            {"text": "x", "nodeId": "n" * 256, "snapshotId": "snap"},
+            {"text": "x", "nodeId": "n", "snapshotId": "s" * 256},
+            {"text": "x" * 8001}, {"text": "\ud800"},
+        ]
+        for args in invalid_args:
+            with self.subTest(args={k: v if k not in ("nodeId", "snapshotId") or not isinstance(v, str) else f"len={len(v)}" for k, v in args.items()}):
+                with self.assertRaises(mcp.BridgeError) as raised:
+                    self.server.call_tool("android_action", {"action": "input", "args": args})
+                self.assertEqual(raised.exception.code, "invalid_args")
+        boundary = "x" * 7998 + "😀"
+        self.server.call_tool("android_action", {"action": "input", "args": {"text": boundary}})
+        self.assertEqual(self.http.actions[-1]["args"]["text"], boundary)
+        self.assertEqual(len(self.http.actions), before + 1)
+
     def test_http_redirect_is_rejected_without_following(self):
         self.http.redirect_status = True
         with self.assertRaises(mcp.BridgeError) as raised:
@@ -250,7 +335,7 @@ class AndroidMCPTests(unittest.TestCase):
         self.assertEqual(allowed, {"wake", "open_app", "tap_node", "tap", "swipe", "long_press", "input", "back", "home"})
         self.assertTrue(allowed.isdisjoint({"resume", "unlock", "grant_permission", "approve_payment"}))
         description = actions["description"]
-        for required in ("open_app requires args.packageName", "tap requires args.x and args.y", "input requires args.text"):
+        for required in ("open_app requires args.packageName", "tap requires args.x and args.y", "complete Unicode string in one args.text call"):
             self.assertIn(required, description)
         self.assertIn("Prefer tap_node", description)
         self.assertIn("original screen pixel coordinates", description)

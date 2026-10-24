@@ -909,6 +909,11 @@ for line in sys.stdin:
         self.assertIn("multi_agent_v2 = false", config)
         self.assertIn("max_depth = 1", config)
         self.assertIn("at most 3 subagents", config)
+        # Multiline instructions must remain one correctly escaped TOML string.
+        raw_prompt = next(line.split(" = ", 1)[1] for line in config.splitlines()
+                          if line.startswith("developer_instructions = "))
+        self.assertEqual(json.loads(raw_prompt), server.agent_instructions(3))
+        self.assertIn("\n\n", json.loads(raw_prompt))
         catalog = json.loads((server.Path(__file__).resolve().parent / "models-deepseek.json").read_text(encoding="utf-8"))
         for model in catalog["models"]:
             self.assertEqual(model["multi_agent_version"], "v1")
