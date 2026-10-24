@@ -29,9 +29,12 @@ def run_client(tool: str, arguments: dict, app: Path = DEFAULT_APP, *, popen_fac
     request_id = arguments.get("requestId") if isinstance(arguments.get("requestId"), str) else None
     app = Path(app)
     installed_server = app / "assistant_mcp_server.py"
-    server = installed_server if installed_server.is_file() else SERVER
-    if not server.is_file():
-        raise ClientFailure("unavailable", "DAXQO MCP server file was not found in the app or development workspace")
+    try:
+        server = installed_server if installed_server.is_file() else SERVER
+        if not server.is_file():
+            raise ClientFailure("unavailable", "DAXQO MCP server file was not found in the app or development workspace")
+    except OSError:
+        raise ClientFailure("unavailable", "DAXQO MCP server path is not accessible; select an accessible installation with --app") from None
     payload = "\n".join((
         json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}}, ensure_ascii=False),
         json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}, ensure_ascii=False),

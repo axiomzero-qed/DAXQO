@@ -84,11 +84,22 @@ class AssistantClientTests(unittest.TestCase):
 
     def test_timeout_reports_uncertain_delivery_and_keeps_request_id(self):
         proc = TimeoutProcess()
-        with self.assertRaises(client.ClientFailure) as raised:
-            client.run_client("daxqo_submit", {"prompt": "task", "requestId": "stable-request-123"}, popen_factory=proc.factory)
+        with tempfile.TemporaryDirectory() as directory, self.assertRaises(client.ClientFailure) as raised:
+            client.run_client("daxqo_submit", {"prompt": "task", "requestId": "stable-request-123"},
+                              Path(directory), popen_factory=proc.factory)
         self.assertEqual(raised.exception.code, "timeout")
         self.assertEqual(raised.exception.request_id, "stable-request-123")
         self.assertIn("delivery may be unknown", str(raised.exception))
+
+    def test_inaccessible_server_path_returns_a_safe_error_before_process_start(self):
+        proc = FakeProcess()
+        with patch.object(Path, "is_file", side_effect=PermissionError("private fixture path")), \
+                self.assertRaises(client.ClientFailure) as raised:
+            client.run_client("daxqo_status", {"taskId": TASK_ID}, popen_factory=proc.factory)
+        self.assertEqual(raised.exception.code, "unavailable")
+        self.assertIn("--app", str(raised.exception))
+        self.assertNotIn("private fixture path", str(raised.exception))
+        self.assertIsNone(proc.command)
 
     def test_invalid_tool_and_non_object_args_fail_before_starting_server(self):
         with self.assertRaises(client.ClientFailure):
