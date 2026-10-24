@@ -151,7 +151,8 @@ class AppServerRequestBoundaryTests(unittest.TestCase):
 class HarnessTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        # Match the service's canonical paths, including Windows 8.3 TEMP aliases.
+        self.root = Path(self.temp.name).resolve()
         self.fake_path = self.root / "fake_app_server.py"
         self.fake_path.write_text(FAKE_APP_SERVER, encoding="utf-8")
         self.engine = server.AppServer([sys.executable, str(self.fake_path)], self.root / "codex", lambda _: None)
