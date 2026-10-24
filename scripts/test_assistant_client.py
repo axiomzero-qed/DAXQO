@@ -85,8 +85,11 @@ class AssistantClientTests(unittest.TestCase):
     def test_timeout_reports_uncertain_delivery_and_keeps_request_id(self):
         proc = TimeoutProcess()
         with tempfile.TemporaryDirectory() as directory, self.assertRaises(client.ClientFailure) as raised:
+            app = Path(directory) / "installed-app"
+            app.mkdir()
+            (app / "assistant_mcp_server.py").write_text("# timeout fixture server path\n", encoding="utf-8")
             client.run_client("daxqo_submit", {"prompt": "task", "requestId": "stable-request-123"},
-                              Path(directory), popen_factory=proc.factory)
+                              app, popen_factory=proc.factory)
         self.assertEqual(raised.exception.code, "timeout")
         self.assertEqual(raised.exception.request_id, "stable-request-123")
         self.assertIn("delivery may be unknown", str(raised.exception))

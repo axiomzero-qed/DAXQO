@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.6.1"
 DEFAULT_PORT = 18882
 DEFAULT_BACKEND_PORT = 18880
 MAX_REQUEST = 1024 * 1024
@@ -524,7 +524,7 @@ class RuntimeManager:
             return self._write_test_report(int(result), "")
         try:
             result = subprocess.run([sys.executable, "-m", "unittest", "test_server", "test_supervisor",
-                                     "test_runtime_control", "test_task_services", "test_android_mcp", "test_phone_backends", "test_remote_protocol", "test_remote_email_mcp", "test_email_control", "test_agent_context", "test_assistant_mcp", "test_assistant_client", "test_install_assistant_skill"], cwd=str(cwd), stdin=subprocess.DEVNULL,
+                                     "test_runtime_control", "test_task_services", "test_android_mcp", "test_phone_backends", "test_remote_protocol", "test_remote_email_mcp", "test_email_control", "test_agent_context", "test_assistant_mcp", "test_assistant_client", "test_install_assistant_skill", "test_artifacts", "test_email_attachments"], cwd=str(cwd), stdin=subprocess.DEVNULL,
                                     capture_output=True, text=True, encoding="utf-8", errors="replace",
                                     timeout=600, check=False)
             output = "[stdout]\n" + (result.stdout or "") + "\n[stderr]\n" + (result.stderr or "")

@@ -1,5 +1,7 @@
 import os
 from pathlib import Path
+import socket
+import stat
 import tempfile
 import unittest
 
@@ -75,7 +77,7 @@ class ArtifactTests(unittest.TestCase):
             self.skipTest("symlink creation is unavailable")
         self.assertEqual(referenced_files(f"`{link.as_posix()}`", self.root, self.resolver), [])
 
-    def test_read_file_limit_and_non_regular_paths(self):
+    def test_read_file_limit_and_directory_paths(self):
         file_path = self.root / "data.txt"
         file_path.write_bytes(b"12345")
         with self.assertRaises(OverflowError):
@@ -84,11 +86,40 @@ class ArtifactTests(unittest.TestCase):
         directory.mkdir()
         with self.assertRaises(ValueError):
             read_file(self.resolver, "folder")
-        if os.name == "posix":
-            fifo = self.root / "pipe"
-            os.mkfifo(fifo)
+
+    def test_read_file_rejects_unix_socket_path(self):
+        if not hasattr(socket, "AF_UNIX"):
+            self.skipTest("Unix domain sockets are unavailable")
+        socket_path = self.root / "socket-file"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            try:
+                listener.bind(str(socket_path))
+            except PermissionError as exc:
+                self.skipTest(f"Unix socket creation denied by host policy: {exc.strerror or 'permission denied'}")
             with self.assertRaises(ValueError):
-                read_file(self.resolver, "pipe")
+                read_file(self.resolver, "socket-file")
+        finally:
+            listener.close()
+
+    @unittest.skipUnless(os.name == "posix", "Character-device fixture requires POSIX")
+    def test_read_file_rejects_real_character_device(self):
+        device = Path(os.devnull)
+        if not stat.S_ISCHR(device.stat().st_mode):
+            self.skipTest("os.devnull is not a character device on this host")
+        resolver = lambda _relative: (device, os.fspath(device))
+        with self.assertRaises(ValueError):
+            read_file(resolver, "devnull")
+
+    @unittest.skipUnless(os.name == "posix", "FIFO fixtures require POSIX")
+    def test_read_file_rejects_fifo_when_creation_is_permitted(self):
+        fifo = self.root / "pipe"
+        try:
+            os.mkfifo(fifo)
+        except PermissionError as exc:
+            self.skipTest(f"FIFO creation denied by host policy: {exc.strerror or 'permission denied'}")
+        with self.assertRaises(ValueError):
+            read_file(self.resolver, "pipe")
 
     def test_image_type_accepts_raster_signatures_and_rejects_markup(self):
         examples = {

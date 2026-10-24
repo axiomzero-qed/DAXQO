@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import http.client
 import json
@@ -19,14 +20,63 @@ import time
 
 APP = Path("/root/phone-harness")
 STAGE = Path("/sdcard/Download/daxqo-stage")
+MANAGER_STAGE_ARG = str(STAGE / "backend")
 BACKEND_PORT = 18880
 RUNTIME_PORT = 18882
 MAX_SOURCE = 2 * 1024 * 1024
-MANAGER_STAGE_ARG = "/sdcard/Download/daxqo-stage/backend"
+_SEMVER_NUM = r"(?:0|[1-9]\d*)"
+_SEMVER_PRE_ID = r"(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+APP_VERSION_PATTERN = re.compile(
+    rf"{_SEMVER_NUM}\.{_SEMVER_NUM}\.{_SEMVER_NUM}"
+    rf"(?:-(?:{_SEMVER_PRE_ID})(?:\.{_SEMVER_PRE_ID})*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
 
 
 class RefreshError(RuntimeError):
     pass
+
+
+def parse_app_version(source: bytes) -> str:
+    try:
+        tree = ast.parse(source.decode("utf-8"), filename="runtime_control.py")
+    except (SyntaxError, UnicodeError) as exc:
+        raise RefreshError("Staged runtime_control.py is not valid UTF-8 Python") from exc
+    assignments = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "APP_VERSION" for target in node.targets):
+            assignments.append(node.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "APP_VERSION":
+            assignments.append(node.value)
+    if len(assignments) != 1 or not isinstance(assignments[0], ast.Constant) or not isinstance(assignments[0].value, str):
+        raise RefreshError("Staged source must define exactly one literal APP_VERSION")
+    version = assignments[0].value
+    if not APP_VERSION_PATTERN.fullmatch(version):
+        raise RefreshError("Staged APP_VERSION is invalid")
+    return version
+
+
+def configure_paths(app: Path, stage: Path, manager_stage: Path) -> None:
+    global APP, STAGE, MANAGER_STAGE_ARG
+    APP = app
+    STAGE = stage
+    MANAGER_STAGE_ARG = str(manager_stage)
+
+
+def build_worker_command(args: argparse.Namespace) -> list[str]:
+    return [sys.executable, str(Path(__file__).resolve()), "--launch", "worker", "--sha256", args.sha256,
+            "--app", str(args.app), "--stage", str(args.stage), "--manager-stage", str(args.manager_stage)]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--launch", choices=("detach", "worker"), required=True)
+    parser.add_argument("--sha256", required=True)
+    parser.add_argument("--app", type=Path, default=APP)
+    parser.add_argument("--stage", type=Path, default=STAGE)
+    parser.add_argument("--manager-stage", type=Path, default=Path(MANAGER_STAGE_ARG))
+    return parser
 
 
 def checked_regular(path: Path, *, limit: int | None = None) -> os.stat_result:
@@ -259,6 +309,7 @@ def run(expected_sha256: str) -> None:
         new_bytes = read_regular(candidate, MAX_SOURCE)
         if not secrets.compare_digest(hashlib.sha256(new_bytes).hexdigest(), expected_sha256):
             raise RefreshError("Staged source SHA-256 does not match")
+        candidate_version = parse_app_version(new_bytes)
         old_info = checked_regular(target, limit=MAX_SOURCE)
         old_mode = stat.S_IMODE(old_info.st_mode)
         old_bytes = read_regular(target, MAX_SOURCE)
@@ -319,7 +370,7 @@ def run(expected_sha256: str) -> None:
                 check_idle(status)
                 backend_identity(app, status)
                 bridge_status = http_json(RUNTIME_PORT, "/api/runtime/status", capability, timeout=.6)
-                return bridge_status.get("app") == {"name": "DAXQO", "version": "0.5.0"}
+                return bridge_status.get("app") == {"name": "DAXQO", "version": candidate_version}
             except (RefreshError, OSError):
                 return False
 
@@ -351,13 +402,11 @@ def run(expected_sha256: str) -> None:
         os.close(lock_fd)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--launch", choices=("detach", "worker"), required=True)
-    parser.add_argument("--sha256", required=True)
-    args = parser.parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    configure_paths(args.app, args.stage, args.manager_stage)
     if args.launch == "detach":
-        command = [sys.executable, str(Path(__file__).resolve()), "--launch", "worker", "--sha256", args.sha256]
+        command = build_worker_command(args)
         app = safe_dir(APP)
         state = safe_dir(app / "state")
         log_path = state / "refresh-runtime.log"

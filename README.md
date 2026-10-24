@@ -7,9 +7,9 @@
 
 ## V0.6 语音草稿与成果交付 / V0.6 voice drafts and artifact delivery
 
-V0.6 增加本机优先的语音转写草稿、GUI 工作区成果卡片和授权栅格图片预览，并收紧远程邮件附件范围与大小限制。网页语音入口需配套新版原生 APK；本机麦克风识别尚未真机验收。历史任务规划与助手转交见 [V0.5 说明](docs/V0.5.md)，本版行为说明见 [V0.6 指南](docs/V0.6.md)。
+V0.6 增加本机优先的语音转写草稿、GUI 工作区成果卡片和授权栅格图片预览，并收紧远程邮件附件范围与大小限制。0.6.1 补丁提高 Android versionCode，以兼容从现有 code 10 安装版本升级；尚未完成真机验收。网页语音入口需配套新版原生 APK；本机麦克风识别尚未真机验收。历史任务规划与助手转交见 [V0.5 说明](docs/V0.5.md)，本版行为说明见 [V0.6 指南](docs/V0.6.md)。
 
-V0.6 adds local-first speech transcription into editable drafts, GUI workspace artifact cards and authorized raster-image previews, and tighter scope and size limits for remote email attachments. The voice button requires the matching newer native APK; microphone recognition has not been verified on a physical device. See the historical [V0.5 guide](docs/V0.5.md) and the [V0.6 guide](docs/V0.6.md).
+V0.6 adds local-first speech transcription into editable drafts, GUI workspace artifact cards and authorized raster-image previews, and tighter scope and size limits for remote email attachments. The 0.6.1 patch raises Android versionCode for upgrades from existing code 10 installs; this has not yet been verified on a physical device. The voice button requires the matching newer native APK; microphone recognition has not been verified on a physical device. See the historical [V0.5 guide](docs/V0.5.md) and the [V0.6 guide](docs/V0.6.md).
 
 ## 中文
 
@@ -17,7 +17,7 @@ DAXQO 是单仓库双平台配置：Standard 为基准版本（基准提交 `837
 
 DAXQO 是面向手机的 Agent 工作台：Android 提供持续对话与成果界面，工具在手机已有的 Linux 环境执行，模型通过用户配置的 API 接入。项目采用 [MIT 许可证](LICENSE)；仓库地址为 [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO)。第三方依赖见[第三方说明](THIRD_PARTY_NOTICES.md)。
 
-当前源码为 V0.6，包含 V0.5 的任务规划与助手转交，以及语音草稿、GUI 成果交付和受限邮件附件。见 [V0.6 指南](docs/V0.6.md)、[V0.5 历史说明](docs/V0.5.md)、[V0.4 控制与邮件指南](docs/V0.4.md) 和 [V0.4 STEPX Neo 验收记录](docs/NEO-V04-ACCEPTANCE.md)。GitHub 上现有的 [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) 仍是 V0.3 APK，不包含 V0.6。构建当前源码请使用：
+当前源码为 V0.6（补丁版 0.6.1，Android versionCode 11），包含 V0.5 的任务规划与助手转交，以及语音草稿、GUI 成果交付和受限邮件附件；针对现有 code 10 安装版的升级兼容尚未真机验收。见 [V0.6 指南](docs/V0.6.md)、[V0.5 历史说明](docs/V0.5.md)、[V0.4 控制与邮件指南](docs/V0.4.md) 和 [V0.4 STEPX Neo 验收记录](docs/NEO-V04-ACCEPTANCE.md)。GitHub 上现有的 [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) 仍是 V0.3 APK，不包含 V0.6。构建当前源码请使用：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1
@@ -114,7 +114,7 @@ DAXQO is one repository with two platform configurations. Standard is the baseli
 
 DAXQO is a mobile Agent workspace. Its Android app provides persistent conversations and a results interface; tools run inside a Linux environment already available on the phone, and models are connected through an API configured by the user. The project uses the [MIT License](LICENSE); its repository is [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO). See [third-party notices](THIRD_PARTY_NOTICES.md) for external dependencies.
 
-The current source is V0.6, including V0.5 task planning and assistant handoff alongside voice drafts, GUI artifact delivery, and scoped email attachments. See the [V0.6 guide](docs/V0.6.md), [historical V0.5 guide](docs/V0.5.md), [V0.4 phone-control and email guide](docs/V0.4.md), and [V0.4 STEPX Neo acceptance record](docs/NEO-V04-ACCEPTANCE.md). The existing [V0.3 GitHub release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) remains a V0.3 APK and does not include V0.6. Build the current source with:
+The current source is V0.6 (patch 0.6.1, Android versionCode 11), including V0.5 task planning and assistant handoff alongside voice drafts, GUI artifact delivery, and scoped email attachments. Upgrade compatibility for existing code 10 installs has not yet been verified on a physical device. See the [V0.6 guide](docs/V0.6.md), [historical V0.5 guide](docs/V0.5.md), [V0.4 phone-control and email guide](docs/V0.4.md), and [V0.4 STEPX Neo acceptance record](docs/NEO-V04-ACCEPTANCE.md). The existing [V0.3 GitHub release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) remains a V0.3 APK and does not include V0.6. Build the current source with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1
