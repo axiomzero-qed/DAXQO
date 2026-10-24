@@ -13,6 +13,7 @@ import re
 import stat
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from typing import Any, BinaryIO
@@ -74,27 +75,41 @@ def _safe_tree(value: Any, compact: bool = True) -> dict[str, Any]:
         if safe_node.get("password") is True:
             safe_node["text"] = ""
             safe_node["description"] = ""
+            safe_node.pop("selectionStart", None)
+            safe_node.pop("selectionEnd", None)
         if not compact:
             safe_nodes.append(safe_node)
             continue
+        focused = safe_node.get("focused") is True
         bounds = safe_node.get("bounds")
         width, height = result.get("width"), result.get("height")
-        if safe_node.get("visible") is False or not isinstance(bounds, list) or len(bounds) != 4 or \
-                not isinstance(width, (int, float)) or not isinstance(height, (int, float)):
+        bounds_valid = isinstance(bounds, list) and len(bounds) == 4 and \
+            isinstance(width, (int, float)) and not isinstance(width, bool) and \
+            isinstance(height, (int, float)) and not isinstance(height, bool)
+        if bounds_valid:
+            try: left, top, right, bottom = (float(v) for v in bounds)
+            except (TypeError, ValueError): bounds_valid = False
+        if bounds_valid and not focused and (
+                safe_node.get("visible") is False or right <= 0 or bottom <= 0 or left >= width or
+                top >= height or right <= left or bottom <= top):
             continue
-        try: left, top, right, bottom = (float(v) for v in bounds)
-        except (TypeError, ValueError): continue
-        if right <= 0 or bottom <= 0 or left >= width or top >= height or right <= left or bottom <= top:
+        if not bounds_valid and not focused:
             continue
         label_key = "text" if safe_node.get("text") else "description" if safe_node.get("description") else None
-        if not label_key and not any(safe_node.get(flag) is True for flag in ("clickable", "editable", "scrollable")):
+        if not label_key and not focused and not any(safe_node.get(flag) is True for flag in ("clickable", "editable", "scrollable")):
             continue
         compact_node = {"id": safe_node.get("id"), "parentId": safe_node.get("parentId"),
-                        label_key: safe_node[label_key] if label_key else None,
-                        "bounds": bounds}
+                        label_key: safe_node[label_key] if label_key else None}
         if not label_key: compact_node.pop(None, None)
+        if bounds_valid: compact_node["bounds"] = bounds
         for flag in ("clickable", "editable", "scrollable"):
             if safe_node.get(flag) is True: compact_node[flag] = True
+        if focused: compact_node["focused"] = True
+        if safe_node.get("editable") is True and safe_node.get("password") is not True:
+            for key in ("selectionStart", "selectionEnd"):
+                value = safe_node.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= -1:
+                    compact_node[key] = value
         safe_nodes.append(compact_node)
     result["nodes"] = safe_nodes
     if len(nodes) > len(safe_nodes):
@@ -103,7 +118,11 @@ def _safe_tree(value: Any, compact: bool = True) -> dict[str, Any]:
         original = result.get("truncated") is True
         result["truncated"] = original
         while safe_nodes and len(json.dumps(result, ensure_ascii=False, separators=(",", ":"))) > COMPACT_TREE_LIMIT:
-            safe_nodes.pop()
+            removable = next((index for index in range(len(safe_nodes) - 1, -1, -1)
+                              if safe_nodes[index].get("focused") is not True), None)
+            if removable is None:
+                break
+            safe_nodes.pop(removable)
             result["truncated"] = True
     return result
 
@@ -147,6 +166,14 @@ class AndroidBridge:
     def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         route = (method, path) in (("GET", "/api/device/status"), ("GET", "/api/device/approvals"),
                                   ("POST", "/api/device/execute"))
+        if method == "GET" and path.startswith("/api/device/apps"):
+            parts = urllib.parse.urlsplit(path)
+            try:
+                query = urllib.parse.parse_qs(parts.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+                route = (parts.path == "/api/device/apps" and not parts.fragment and not parts.netloc
+                         and set(query) <= {"query", "limit"} and all(len(v) == 1 for v in query.values()))
+            except ValueError:
+                route = False
         owner_decision = method == "POST" and re.fullmatch(
             r"/api/device/approvals/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", path)
         if not route and not owner_decision:
@@ -191,6 +218,11 @@ class AndroidBridge:
     def status(self) -> dict[str, Any]:
         return _public_value(self.request("GET", "/api/device/status"))
 
+    def apps(self, query: str = "", limit: int = 80) -> dict[str, Any]:
+        if not isinstance(query, str) or len(query) > 80 or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise BridgeError("invalid_args", "App query must be at most 80 characters and limit 1..200")
+        return _public_value(self.request("GET", "/api/device/apps?" + urllib.parse.urlencode({"query": query, "limit": limit})))
+
     def execute(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
         envelope = {"id": request_id, "action": action, "args": args}
@@ -218,22 +250,35 @@ class AndroidBridge:
 
 
 TOOL_DEFINITIONS = [
-    {"name": "android_status", "description": "Read Android DAXQO accessibility/control readiness. Does not change device state.",
+    {"name": "android_apps", "description": "Find already-installed, enabled launcher apps by name or package before opening a store or browser. Read-only metadata; no accounts, phone number, private content or location. An unavailable/truncated catalog is not proof an app is absent.",
+     "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+     "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "maxLength": 80}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}}, "additionalProperties": False}},
+    {"name": "android_status", "description": "Read phone/control readiness, policy, device and installed appStores (OEM first, third-party last), with preferredAppStore when available. Read once initially, then only when readiness changes. Does not change device state.",
      "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
-    {"name": "android_observe", "description": "Read the current accessibility tree and optionally capture a screenshot. Tree output is compact by default; set compact=false for the full tree. Password-field text is removed. Does not change device state.",
+    {"name": "android_observe", "description": "Read the current compact UI tree, including focus/selection and original screen width/height. Reuse the latest observation; normally one read after a UI change suffices. Add a screenshot only for visual ambiguity/canvas controls, requesting tree and image together if needed. compact=false exposes the full tree for missing metadata. Password text is removed. Does not change device state.",
      "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
      "inputSchema": {"type": "object", "properties": {
          "includeTree": {"type": "boolean", "default": True},
          "includeScreenshot": {"type": "boolean", "default": False},
          "compact": {"type": "boolean", "default": True},
          "expectedPackage": {"type": "string", "maxLength": 255}}, "additionalProperties": False}},
-    {"name": "android_action", "description": "Perform one bounded Android action under the owner's phone policy. Prefer tap_node with args.nodeId and args.snapshotId from the latest observed tree; it clicks that accessibility node. tap requires args.x and args.y as original screen pixel coordinates, never coordinates from a displayed or resized screenshot. open_app requires args.packageName; input requires args.text. Full mode executes without an extra DAXQO consent gate. Confirm mode returns approval_required plus an approval ID for sensitive writes; report waiting for owner confirmation and end the turn, without asking the owner to operate the phone. Owner GUI or authenticated email handles consent and automatically resumes this task. Never approve yourself or change policy through other tools. Wake can dismiss a known non-secure swipe lock through Android's official API; verify actual state. Report actual system failures accurately; no secure-keyguard or protected-window bypass.",
+    {"name": "android_action", "description": "One phone action; observe its actual result. Prefer tap_node with latest args.nodeId+args.snapshotId. tap requires args.x and args.y in original screen pixel coordinates; long_press uses the same. swipe: args.x1,y1,x2,y2,durationMs=350 (50..2000); move UP inside the list to reveal LOWER rows. After two unchanged swipes adjust once, then change approach. open_app requires args.packageName (prefer status.preferredAppStore for installs). input: complete Unicode string in one args.text call, mode=insert at cursor/selection by default or replace for the whole field; never type Chinese key by key. Full mode attempts authorized actions directly. On approval_required report action+approval ID and end the turn; owner GUI/authenticated email resumes it. Never self-approve, change policy or bypass actual Android restrictions. wake supports non-secure locks only. After timeout observe before another write; never blindly replay it.",
      "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True},
      "inputSchema": {"type": "object", "properties": {
          "action": {"type": "string", "enum": list(ACTION_NAMES)},
-         "args": {"type": "object"},
-         "expectedPackage": {"type": "string", "maxLength": 255}},
+         "args": {"type": "object", "properties": {
+             "nodeId": {"type": "string", "description": "tap_node/input: requires matching snapshotId"},
+             "snapshotId": {"type": "string"},
+             "x": {"type": "number"}, "y": {"type": "number"},
+             "x1": {"type": "number"}, "y1": {"type": "number"},
+             "x2": {"type": "number"}, "y2": {"type": "number"},
+             "durationMs": {"type": "integer", "description": "swipe: 50..2000, default 350; long_press: 500..2000, default 700"},
+             "packageName": {"type": "string", "description": "open_app: an observed/installed package"},
+             "text": {"type": "string", "description": "input: complete Unicode string, max 8000 UTF-16 units"},
+             "mode": {"type": "string", "enum": ["insert", "replace"], "default": "insert"}}},
+         "expectedPackage": {"type": "string", "maxLength": 255,
+                             "description": "Expected CURRENT foreground before the action, not its destination. Omit for open_app; use args.packageName for the app to open."}},
          "required": ["action"], "additionalProperties": False}},
 ]
 
@@ -264,15 +309,28 @@ def _validate_action_args(action: str, args: Any, expected_package: Any) -> dict
     elif action == "swipe":
         for name in ("x1", "y1", "x2", "y2"): number(name)
         duration = result.get("durationMs", 350)
-        if isinstance(duration, bool) or not isinstance(duration, int) or not 1 <= duration <= 10000:
-            raise BridgeError("invalid_args", "durationMs must be between 1 and 10000")
+        if isinstance(duration, bool) or not isinstance(duration, int) or not 50 <= duration <= 2000:
+            raise BridgeError("invalid_args", "swipe durationMs must be between 50 and 2000")
         result["durationMs"] = duration
     elif action == "input":
         text = result.get("text")
-        if not isinstance(text, str) or len(text) > 16000:
-            raise BridgeError("invalid_args", "input text must be a string of at most 16000 characters")
-        if result.get("nodeId") is not None and (not isinstance(result.get("nodeId"), str) or not isinstance(result.get("snapshotId"), str)):
-            raise BridgeError("invalid_args", "nodeId requires the matching snapshotId")
+        if not isinstance(text, str):
+            raise BridgeError("invalid_args", "input text must be a Unicode string")
+        try:
+            utf16_units = len(text.encode("utf-16-le", errors="strict")) // 2
+        except UnicodeEncodeError:
+            raise BridgeError("invalid_args", "input text must contain valid Unicode") from None
+        if utf16_units > 8000:
+            raise BridgeError("invalid_args", "input text must be at most 8000 UTF-16 code units")
+        mode = result.get("mode", "insert")
+        if not isinstance(mode, str) or mode not in ("insert", "replace"):
+            raise BridgeError("invalid_args", "input mode must be 'insert' or 'replace'")
+        result["mode"] = mode
+        if "nodeId" in result or "snapshotId" in result:
+            node_id, snapshot_id = result.get("nodeId"), result.get("snapshotId")
+            if not isinstance(node_id, str) or not node_id or len(node_id) > 255 or \
+                    not isinstance(snapshot_id, str) or not snapshot_id or len(snapshot_id) > 255:
+                raise BridgeError("invalid_args", "input nodeId requires a matching non-empty snapshotId; both must be at most 255 characters")
     elif action == "open_app":
         package = result.get("packageName")
         if not isinstance(package, str) or not re.fullmatch(r"[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+", package):
@@ -294,6 +352,8 @@ class AndroidMCP:
     def call_tool(self, name: str, args: Any) -> dict[str, Any]:
         if not isinstance(args, dict):
             raise BridgeError("invalid_args", "Tool arguments must be an object")
+        if name == "android_apps":
+            return self._tool_result([self._text(self.bridge.apps(args.get("query", ""), args.get("limit", 80)))])
         if name == "android_status":
             return self._tool_result([self._text(self.bridge.status())])
         if name == "android_observe":

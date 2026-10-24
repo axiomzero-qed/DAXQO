@@ -82,17 +82,18 @@ final class DeviceState {
             PowerManager power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
             DeviceAccessibilityService service = DeviceAccessibilityService.current;
             LockState lock = lockState(context);
-            result.put("version", "0.4.0");
+            result.put("version", context.getPackageManager().getPackageInfo(context.getPackageName(), 0).versionName);
             PlatformProfile profile = PlatformProfile.fromId(context.getString(R.string.platform_id));
             result.put("platformId", profile.id);
             result.put("device", new JSONObject().put("manufacturer", android.os.Build.MANUFACTURER)
                     .put("model", android.os.Build.MODEL).put("androidVersion", android.os.Build.VERSION.RELEASE)
                     .put("sdkInt", android.os.Build.VERSION.SDK_INT));
             JSONArray stores = new JSONArray();
-            for (String name : profile.appStoreCandidates()) {
+            for (String name : profile.appStoreCandidates(android.os.Build.MANUFACTURER)) {
                 if (context.getPackageManager().getLaunchIntentForPackage(name) != null) stores.put(name);
             }
             result.put("appStores", stores);
+            result.put("preferredAppStore", stores.length() > 0 ? stores.optString(0, "") : "");
             result.put("controlPageVisible", ControlActivity.visible);
             result.put("paired", context.getSharedPreferences("pairing_private", Context.MODE_PRIVATE).getString("capability", "").length() >= 32);
             result.put("accessibilityConnected", service != null);
@@ -107,6 +108,8 @@ final class DeviceState {
             result.put("screenOn", power != null && power.isInteractive());
             result.put("batteryOptimizationsIgnored", power != null && power.isIgnoringBatteryOptimizations(context.getPackageName()));
             result.put("screenshotSupported", android.os.Build.VERSION.SDK_INT >= 30);
+            result.put("appsSupported", true);
+            result.put("cursorInputMethodSupported", service != null && service.cursorInputMethodSupported());
             result.put("bridgeListening", service != null && service.bridgeListening());
             result.put("packageName", service == null ? "" : service.foregroundPackage());
             result.put("lastAction", service == null ? "" : service.lastAction);
