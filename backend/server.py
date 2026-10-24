@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -28,6 +29,7 @@ from typing import Any, Callable
 from task_services import TaskServices
 from email_control import MailControlService
 from android_mcp_server import AndroidBridge, BridgeError
+from agent_context import PhoneContext
 
 RPC_TIMEOUT = 30.0
 MAX_BODY = 1024 * 1024
@@ -38,6 +40,28 @@ API_KEY_ENV = "PHONE_HARNESS_MODEL_KEY"
 MAX_TEXT_FILE = 1024 * 1024
 MAX_DOWNLOAD_FILE = 20 * 1024 * 1024
 MAX_DIRECTORY_ITEMS = 200
+
+
+def agent_instructions(agent_threads: int) -> str:
+    return f"""Reply in Chinese by default. Complete the user's goal with the fewest useful steps. Act on ordinary reversible steps; ask only for missing information or actual authorization. Give brief progress at milestones or real blockers, without narrating each tap. Use at most {agent_threads} subagents for independent non-UI work; simple tasks and all interaction with this one phone stay with one agent. Never disclose credentials or hidden reasoning.
+
+Before acting, use the supplied phone facts and installed apps to choose an approach. For a multi-step request give a short public plan (goal, chosen app/tool, 2-4 stages, and the final check), not hidden reasoning. Simple one-step requests need no elaborate plan. Prefer available MCP/Skills/CLI for supported semantic work, and suitable INSTALLED phone apps for Android work. The current foreground browser is not a reason to start browsing. For nearby places, driving, routes or travel, prefer an installed map/navigation app, obtain actual in-app current location, then inspect real nearby results and details. Reuse an app that is already installed and usable; do not update it just because an update is offered. Use android_apps to resolve the relevant app by name/package when the supplied catalog is incomplete or stale. Only after confirming a needed app is absent should you install it from the device's preferred store, then proceed. Use web search for an explicit web request, missing information, or a concrete app limitation, not as the default first action. Respect the user's named app/site and newer instructions.
+
+Owner defaults: decline/skip notification permission and marketing prompts unless the task explicitly requires notifications. Allow location needed for the requested task directly, normally only while using the app; precise location is appropriate for navigation/nearby distance, and background/always-on access is not a default. If login is required, first reuse a logged-in session; otherwise prefer the app's legitimate one-tap login with this phone's number/SIM. Use normal SMS/autofill verification if needed. Do not invent a phone number or account, expose codes, switch to an unrelated identity, buy a membership, or evade a CAPTCHA/real-person/biometric check. A genuine verification blocker should state the specific remaining step. These defaults do not change the native full/confirm mode or allow self-approval.
+
+For phone tasks use only daxqo_android to observe and act. Use the supplied current device facts first; read android_status only if facts are missing/stale or after a readiness, lock or policy error. Use compact android_observe trees by default. Add a screenshot only for ambiguous/canvas controls or visual verification; request tree and screenshot together when both are needed. After each action observe the changed state once, reuse that observation, and take the obvious next step. Avoid repeated identical observations, full-tree dumps, workspace notes for short tasks, and speculative permission investigations. Allow UI loading before checking; poll downloads at sensible intervals while progress changes.
+
+tap_node uses args.nodeId and args.snapshotId from the latest tree. Raw tap uses args.x/y in ORIGINAL screen pixels, for controls not exposed in the tree. expectedPackage means the CURRENT foreground before acting, never the destination app; omit it for open_app (args.packageName is the destination). Use the actual observed package for system dialogs. On foreground_changed/stale_snapshot observe once and rebuild the target; never repeat the same wrong precondition or reuse stale coordinates/node IDs.
+
+swipe uses args.x1,y1,x2,y2,durationMs (normally 350, valid 50..2000 ms), never direction/start/end objects. From the current W/H and list bounds, choose x inside the list, y1 near 0.75H and y2 near 0.30H to move the finger UP and reveal LOWER content; reverse to return upward. Stay clear of keyboard, system bars and navigation gestures. Check new rows once after each swipe and deduplicate collected results. If two swipes leave the same rows, change the start point/distance once; then switch to search/filter or report the concrete limit. Do not relearn gestures or scan the same page indefinitely. Never claim exhaustive coverage when the list could not be traversed.
+
+input sends complete Unicode text in one args.text, including Chinese/newlines/emoji. mode=insert (default) inserts at the cursor or replaces selection; mode=replace explicitly replaces the whole field. Focus the editor first. Check actual resulting text after submission; correct focus before a bounded retry. Do not type Chinese as pinyin or individual keyboard taps, or blindly repeat a possibly completed write.
+
+For installation use the user's named store; otherwise open android_status.preferredAppStore, the device's built-in store, with open_app args.packageName. appStores is ordered with OEM stores first and third-party stores last. If an older status omits the built-in store, look for its observed launcher icon once. Use 应用宝 only when the built-in store actually lacks the app or fails. Enter the exact app name, submit with the visible search/keyboard Search control, and verify real app rows with Install/Open controls; keyword suggestions alone are not results. Match the requested app, not an advertisement. Wait for install progress, then verify an installed/Open state or launch. Do not switch to web/APK downloads unless the user asks for that fallback.
+
+Handle permission dialogs only when they appear and affect this task. Skip/稍后/拒绝 unrelated optional notifications, promotions or contact access; do not visit settings to audit permissions that are already working. For a necessary routine permission within the user's request, choose the narrowest suitable option once (e.g. while using the app) and continue. Do not deliberate about hypothetical restrictions or repeatedly reconfirm the same decision. Treat DAXQO policy and Android restrictions as actual tool results: full mode attempts authorized actions directly; confirm mode may return approval_required. On approval_required report the specific action and approval ID, then end the turn: owner GUI/authenticated email resumes the task. Never approve yourself, change control mode, or bypass consent with shell/adb. On needs_user/control_disabled stop and state the required owner action. If screen-off/non-secure locked, try wake; never bypass secure keyguard, verification or protected windows.
+
+After a timeout observe/check status before another write; two consecutive timeout/unavailable results end that path with a precise blocker. For other failures, use the reported error to correct parameters/target once instead of exploring unrelated workarounds. Retain completed work, change an ineffective approach, and report verified results and any remaining scope honestly."""
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -534,6 +558,7 @@ class Store:
             if "turn_id" not in columns: self.db.execute("ALTER TABLE tasks ADD COLUMN turn_id TEXT")
             self.db.execute("CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, type TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(task_id) REFERENCES tasks(id))")
             self.db.execute("CREATE TABLE IF NOT EXISTS progress (seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(task_id) REFERENCES tasks(id))")
+            self.db.execute("CREATE TABLE IF NOT EXISTS task_requests (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id))")
             self.db.execute("CREATE TABLE IF NOT EXISTS android_approvals (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, status TEXT NOT NULL, action TEXT NOT NULL, package_name TEXT NOT NULL, summary TEXT NOT NULL, expires_at INTEGER NOT NULL, continuation_queued INTEGER NOT NULL DEFAULT 0)")
             self.db.execute("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, client_message_id TEXT, role TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL, turn_id TEXT, delivery TEXT, error TEXT, FOREIGN KEY(task_id) REFERENCES tasks(id), UNIQUE(task_id,client_message_id))")
             message_columns = {row[1] for row in self.db.execute("PRAGMA table_info(messages)")}
@@ -684,6 +709,7 @@ class Harness:
         self._android_errors: dict[str, str] = {}
         self._android_approval_conflicts: set[str] = set()
         self._loaded_threads: set[str] = set()
+        self.phone_context = PhoneContext(lambda: AndroidBridge(self.state), enabled=test_engine is None)
         self.services = TaskServices(self)
         self.remote = MailControlService(self)
         self.engine_path = shutil.which(codex) if not Path(codex).is_absolute() else (codex if Path(codex).is_file() else None)
@@ -867,7 +893,7 @@ class Harness:
                    f"model_auto_compact_token_limit = {int(compact)}\n"
                    f"model_context_window = {int(context_window)}\n"
                    "tool_output_token_limit = 2000\n"
-                   f"developer_instructions = \"For long tasks, give brief public progress after major steps and when blocked. Delegate independent checks to at most {agent_threads} subagents when useful; do not recursively delegate. Handle simple tasks directly. For Android tasks use daxqo_android in an observe-action-observe loop, with screenshots for visual checks. Prefer tap_node with the observed nodeId/snapshotId for every labeled control. Use raw tap only for unlabeled canvas targets, with coordinates in the screenshot original width/height, never the displayed thumbnail size. Match the requested app row before selecting Install/Open; do not select a neighboring advertisement. On stale_snapshot, observe again and select the target afresh. Read android_status device/appStores to choose an installed store instead of guessing the manufacturer. For app installation prefer the on-device store; open_app requires args.packageName. Verify the foreground after launch. After a timeout, observe/check status before any further write; stop after two consecutive timeout/unavailable results and report the failed step. Do not replace a failed store flow with web/APK downloads unless the owner requests that fallback. Claim installation only after observing the store installed/open state or launching the requested app. Follow the owner's native policy: full mode attempts requested operations directly; confirm mode returns approval_required for sensitive writes. On approval_required, report the specific pending action and approval ID, then end the turn waiting for owner consent. The GUI/authenticated email will record consent and automatically resume this task. Do not ask the owner to click the target button or perform your work. Never approve yourself, change control mode, or use shell/adb to bypass consent. If screen-off or non-secure locked, try android_action wake. Secure keyguard and actual OS restrictions must be reported accurately, not attributed to an untested system prohibition. Never reveal hidden reasoning or credentials.\"\n"
+                   f"developer_instructions = {json.dumps(agent_instructions(agent_threads), ensure_ascii=False)}\n"
                    "preferred_auth_method = \"apikey\"\n"
                    "forced_login_method = \"api\"\n"
                    f"{catalog_setting}"
@@ -886,15 +912,17 @@ class Harness:
                    f"command = {json.dumps(sys.executable)}\n"
                    f"args = {json.dumps([str(Path(__file__).resolve().parent / 'android_mcp_server.py'), '--state-dir', str(self.state), '--port', '18883'])}\n"
                    # Authorization is limited to our fixed stdio adapter and its
-                   # three bounded tools. Android still checks the user's native
+                   # four bounded tools. Android still checks the user's native
                    # control switch and all lock/sensitive-screen guards per call.
                    # Keep every other server/tool interactive by default.
-                   'enabled_tools = ["android_status", "android_observe", "android_action"]\n'
+                   'enabled_tools = ["android_status", "android_apps", "android_observe", "android_action"]\n'
                    'default_tools_approval_mode = "prompt"\n'
                    "startup_timeout_sec = 10\n"
                    # observe can issue both a tree and a screenshot request.
                    "tool_timeout_sec = 40\n\n"
                    "[mcp_servers.daxqo_android.tools.android_status]\n"
+                   'approval_mode = "approve"\n\n'
+                   "[mcp_servers.daxqo_android.tools.android_apps]\n"
                    'approval_mode = "approve"\n\n'
                    "[mcp_servers.daxqo_android.tools.android_observe]\n"
                    'approval_mode = "approve"\n\n'
@@ -1566,7 +1594,7 @@ class Harness:
         if e and e.account_error: account["error"] = e.account_error
         active_rows = self.store.active_rows()
         active = next((r for r in active_rows if r["id"] == self.active_task_id), active_rows[0] if active_rows else None)
-        return {"app": {"name": "DAXQO", "version": "0.4.0"}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
+        return {"app": {"name": "DAXQO", "version": "0.5.0"}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
                 "engine": {"installed": bool(self.engine_path or self.engine), "version": e.version if e else None, "connected": bool(e and e.connected)},
                 "account": account, "activeTaskId": active["id"] if active else None, "activeTaskIds": [r["id"] for r in active_rows],
                 "workspace": str(self.workspace),
@@ -1600,13 +1628,38 @@ class Harness:
         finally:
             if not _provider_update or not was_reconnecting: self.reconnecting = False
 
+    def _phone_thread_instructions(self) -> str:
+        return agent_instructions(max(1, min(4, int(self.services.settings.get("maxSubagents", 2))))) + self.phone_context.instructions()
+
+    def _prior_request(self, request_id, digest):
+        if not request_id: return None
+        with self.store.lock:
+            record = self.store.db.execute("SELECT digest,task_id FROM task_requests WHERE request_id=?", (request_id,)).fetchone()
+        if not record: return None
+        if record["digest"] != digest: raise ValueError("clientRequestId 已用于不同任务，不能重复提交")
+        task = self.store.row(record["task_id"])
+        if not task: raise ValueError("原任务记录不可用，不能盲目重建")
+        return self.store.public(task)
+
     def start_task(self, body: dict[str, Any], resume_id: str | None = None) -> dict[str, Any]:
+        if not isinstance(body, dict): raise ValueError("Task input must be an object")
+        body = dict(body)
+        request_id = body.pop("clientRequestId", None)
+        if request_id is not None and (resume_id or not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{7,127}", request_id)):
+            raise ValueError("clientRequestId must contain 8..128 letters, digits, underscores or hyphens")
+        try: digest = hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+        except (TypeError, ValueError): raise ValueError("Task input must be JSON") from None
+        with self.lock:
+            previous = self._prior_request(request_id, digest)
+            if previous: return previous
         body = self.services.prepare_body(body)
         if not self.engine or not self.engine.connected: raise ValueError("Codex app-server is unavailable")
         if self.reconnecting: raise ValueError("Codex app-server is reconnecting")
         if not self.provider_configured() and not self.engine.account.get("authenticated"):
             raise ValueError("Configure a model API provider or sign in to Codex before starting a task")
         with self.lock:
+            previous = self._prior_request(request_id, digest)
+            if previous: return previous
             if self.reconnecting: raise ValueError("Codex app-server is reconnecting")
             if len(self.store.active_rows()) >= self.max_concurrent_tasks():
                 raise ValueError(f"并发任务数已达上限（{self.max_concurrent_tasks()}），请等待其他任务完成后再试。")
@@ -1636,6 +1689,8 @@ class Harness:
                 with self.store.lock, self.store.db:
                     chosen_model = body.get("model") or (self.provider["model"] if self.provider_configured() else None)
                     self.store.db.execute("INSERT INTO tasks(id,title,prompt,status,created_at,updated_at,model) VALUES(?,?,?,?,?,?,?)", (tid, short_text(title, 200), prompt[:50000], "queued", stamp, stamp, chosen_model))
+                    if request_id:
+                        self.store.db.execute("INSERT INTO task_requests(request_id,digest,task_id) VALUES(?,?,?)", (request_id, digest, tid))
                 display_prompt = body.get("_displayText")
                 self.store.add_message(tid, "user", prompt[:50000], "queued", client_id="initial:" + tid, delivery="started",
                                        display_text=display_prompt if isinstance(display_prompt, str) else None,
@@ -1654,11 +1709,12 @@ class Harness:
         self.store.event(task_id, "status", "running")
         self.store.progress(task_id, "phase", {"phase": "running", "summary": "正在执行"})
         try:
+            instructions = self._phone_thread_instructions()
             if resume:
                 thread_id = row["thread_id"]
-                engine.request("thread/resume", {"threadId": thread_id, "sandbox": self.sandbox, "approvalPolicy": "on-request"})
+                engine.request("thread/resume", {"threadId": thread_id, "sandbox": self.sandbox, "approvalPolicy": "on-request", "developerInstructions": instructions})
             else:
-                params: dict[str, Any] = {"cwd": str(self.workspace), "approvalPolicy": "on-request", "sandbox": self.sandbox}
+                params: dict[str, Any] = {"cwd": str(self.workspace), "approvalPolicy": "on-request", "sandbox": self.sandbox, "developerInstructions": instructions}
                 if row.get("model"): params["model"] = row["model"]
                 result = engine.request("thread/start", params)
                 thread_id = result.get("thread", {}).get("id", result.get("threadId"))
@@ -1703,13 +1759,16 @@ class Harness:
         body = self.services.prepare_body(body)
         text = body.get("text")
         client_id = body.get("clientMessageId")
+        retry = body.get("retry", False)
         if not isinstance(text, str) or not text.strip(): raise ValueError("Message text is required")
         if not isinstance(client_id, str) or not client_id.strip() or len(client_id) > 200: raise ValueError("clientMessageId is required")
+        if not isinstance(retry, bool): raise ValueError("retry must be a boolean")
         text = text[:50000]
         row = self.store.row(task_id)
         if not row: raise KeyError("Task not found")
         existing = self.store.message_by_client(task_id, client_id)
         if existing:
+            if existing.get("text") != text: raise ValueError("clientMessageId was already used with different message text")
             if existing["status"] == "failed":
                 if not body.get("retry"): raise ValueError("Message previously failed; retry:true is required")
                 if not existing.get("retry_safe"): raise ValueError("Retry is unsafe because delivery may have occurred")
@@ -1723,6 +1782,7 @@ class Harness:
             existing = self.store.message_by_client(task_id, client_id)
             retry_existing = None
             if existing:
+                if existing.get("text") != text: raise ValueError("clientMessageId was already used with different message text")
                 if existing["status"] == "failed":
                     if not body.get("retry"): raise ValueError("Message previously failed; retry:true is required")
                     if not existing.get("retry_safe"): raise ValueError("Retry is unsafe because delivery may have occurred")
@@ -1834,7 +1894,7 @@ class Harness:
         try:
             if row["thread_id"] not in self._loaded_threads:
                 self.engine.request("thread/resume", {"threadId": row["thread_id"], "sandbox": self.sandbox,
-                    "approvalPolicy": "on-request"})
+                    "approvalPolicy": "on-request", "developerInstructions": self._phone_thread_instructions()})
                 self._loaded_threads.add(row["thread_id"])
             for message in pending: self.store.update_message(message["id"], status="sending", delivery="sending")
             result = self.engine.request("turn/start", {"threadId": row["thread_id"],
@@ -1937,6 +1997,64 @@ def create_handler(harness: Harness):
             if not isinstance(value, dict): raise ValueError("JSON object required")
             return value
 
+        def _assistant_task_status(self, task_id: str) -> None:
+            try:
+                pairs = urllib.parse.parse_qsl(urllib.parse.urlsplit(self.path).query,
+                    keep_blank_values=True, strict_parsing=True)
+            except ValueError:
+                return self._json(400, {"error": "Invalid task result pagination"})
+            keys = [key for key, _ in pairs]
+            if any(key not in ("offset", "limit") for key in keys) or len(keys) != len(set(keys)):
+                return self._json(400, {"error": "Invalid task result pagination"})
+            params = dict(pairs)
+            offset_text, limit_text = params.get("offset", "0"), params.get("limit", "2000")
+            if (not re.fullmatch(r"[0-9]+", offset_text) or not re.fullmatch(r"[0-9]+", limit_text)):
+                return self._json(400, {"error": "Invalid task result pagination"})
+            try:
+                offset, limit = int(offset_text), int(limit_text)
+            except ValueError:
+                return self._json(400, {"error": "Invalid task result pagination"})
+            if offset < 0 or not 1 <= limit <= 8000:
+                return self._json(400, {"error": "Invalid task result pagination"})
+            row = harness.store.row(task_id)
+            if not row:
+                return self._json(404, {"error": "Task not found"})
+            result = row.get("result")
+            if result is not None and not isinstance(result, str):
+                result = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+            if isinstance(result, str):
+                total = len(result)
+                chunk = result[offset:offset + limit]
+                next_offset = offset + len(chunk)
+                result_part = {"text": chunk, "offset": offset, "totalLength": total,
+                               "truncated": next_offset < total,
+                               **({"nextOffset": next_offset} if next_offset < total else {})}
+            else:
+                total, next_offset, result_part = 0, 0, None
+            with harness.store.lock:
+                stored_progress = harness.store.db.execute(
+                    "SELECT kind,payload,created_at FROM progress WHERE task_id=? ORDER BY seq DESC LIMIT 5",
+                    (task_id,)).fetchall()
+            progress = []
+            for item in reversed(stored_progress):
+                try: payload = json.loads(item["payload"])
+                except (ValueError, TypeError): continue
+                phase = payload.get("phase")
+                if isinstance(phase, str):
+                    progress.append({"phase": phase[:80], "createdAt": item["created_at"]})
+            latest = progress[-1] if progress else None
+            public = {"taskId": task_id, "title": harness.safe_text(row.get("title", ""), 300),
+                      "status": harness.safe_text(row.get("status", "unknown"), 80),
+                      "result": result_part,
+                      "activity": {"phase": latest["phase"] if latest else harness.safe_text(row.get("status", "unknown"), 80),
+                                   **({"lastEventAt": latest["createdAt"]} if latest else {})},
+                      "progress": progress}
+            if isinstance(row.get("error"), str): public["error"] = harness.safe_text(row["error"], 1000)
+            if result is not None:
+                public["resultLength"] = total
+                public["resultNextOffset"] = next_offset if next_offset < total else None
+            return self._json(200, public)
+
         def do_GET(self) -> None:
             path = urllib.parse.urlsplit(self.path).path
             if path == "/healthz": return self._json(200, {"ok": True})
@@ -1957,6 +2075,9 @@ def create_handler(harness: Harness):
             if harness.services.handle_http(self, "GET", path): return
             if harness.remote.handle_http(self, "GET", path): return
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query, keep_blank_values=True)
+            assistant_task = re.fullmatch(r"/api/assistant/tasks/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})", path)
+            if assistant_task:
+                return self._assistant_task_status(assistant_task.group(1))
             if path == "/api/files":
                 try: return self._json(200, harness.list_workspace_files(query.get("path", [""])[0]))
                 except FileNotFoundError: return self._json(404, {"error": "Not found"})

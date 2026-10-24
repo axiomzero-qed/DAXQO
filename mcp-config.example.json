@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "daxqo-assistant-handoff": {
+      "command": "python3",
+      "args": [
+        "/root/phone-harness/assistant_mcp_server.py",
+        "--app",
+        "/root/phone-harness"
+      ]
+    }
+  }
+}

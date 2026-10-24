@@ -1,5 +1,7 @@
 # STEPX Neo V0.4 验收 / STEPX Neo V0.4 acceptance
 
+2026-10-24 的最新输入与执行效率验收见 [V0.4 指南](V0.4.md)及[中文输入说明](TEXT-INPUT.md)。下文保留 2026-10-23 的历史构建与验收结果。
+
 2026-10-23，STEPX Neo PZ261A（Android 16 / SDK 36）完成 Standard V0.4 真机回归。Standard APK 安装身份为 `io.daxqo.app`、版本 `0.4.0`、`platformId=standard`；设备安装后实际 APK SHA-256 为 `cdcc9180acfec0c5ceabac7e89b4caf9d8c47b90a687a5caf992452356a1cea5`。应用商店候选遗漏应用宝 `com.tencent.android.qqdownloader` 的问题已修复。
 
 手机 Linux 通过既有安全维护刷新运行桥，并按带哈希的 manifest 更新源码。166 项后端测试全部通过（28.996 秒）；模型配置摘要、配对资料和既有任务 ID 均保留。原始可读验收记录 `dist/neo/native-acceptance.json` 的 11 项均通过且 `errors=[]`。它覆盖 HTTP 401/403、Settings/通知/Home 被动切换、非安全息屏锁唤醒、重放与冲突保护、计算器启动、陈旧快照拒绝及新节点操作、截图（1200×2670）。该文件中的 `expectedApkSha256` 是期望值；已安装 APK 的实际哈希由 `dist/neo/installed-final.json` 单独记录。

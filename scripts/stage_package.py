@@ -9,9 +9,9 @@ FLAT = ('server.py', 'supervisor.py', 'runtime_control.py', 'test_server.py',
         'test_supervisor.py', 'test_runtime_control.py', 'task_services.py', 'test_task_services.py',
         'android_mcp_server.py', 'test_android_mcp.py', 'phone_backends.py', 'test_phone_backends.py',
         'remote_protocol.py', 'test_remote_protocol.py', 'email_control.py', 'test_email_control.py',
-        'test_remote_email_mcp.py',
+        'test_remote_email_mcp.py', 'agent_context.py', 'test_agent_context.py', 'assistant_mcp_server.py', 'test_assistant_mcp.py',
         'models-deepseek.json', 'WORKSPACE_AGENTS.md')
-SCRIPT_FLAT = ('remote_email_mcp.py',)
+SCRIPT_FLAT = ('remote_email_mcp.py', 'assistant_client.py', 'test_assistant_client.py', 'install_assistant_skill.py', 'test_install_assistant_skill.py')
 
 
 def main():
@@ -20,6 +20,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     files = [(backend / name, name) for name in FLAT]
     files += [(ROOT / 'scripts' / name, name) for name in SCRIPT_FLAT]
+    files += [(ROOT / 'skills' / 'daxqo-handoff' / 'SKILL.md', 'daxqo_handoff_SKILL.md')]
     files += [(path, path.relative_to(backend).as_posix()) for path in sorted((backend / 'static').rglob('*')) if path.is_file()]
     manifest = {'version': (ROOT / 'VERSION').read_text().strip(), 'files': {}}
     for source, relative in files:
