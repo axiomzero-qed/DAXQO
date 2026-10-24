@@ -83,7 +83,7 @@ class RuntimeBridgeApiTests(unittest.TestCase):
         self.assertEqual(status, 401)
         status, data = self.request()
         self.assertEqual(status, 200)
-        self.assertEqual(data["app"], {"name": "DAXQO", "version": "0.4.0"})
+        self.assertEqual(data["app"], {"name": "DAXQO", "version": "0.5.0"})
         self.assertEqual(data["state"], "stopped")
 
     def test_host_origin_and_bearer_are_restricted(self):
@@ -112,9 +112,9 @@ class RuntimeBridgeApiTests(unittest.TestCase):
 
     def test_update_rejects_traversal_unknown_source_symlink_and_bad_digest(self):
         cases = [
-            ({"version": "0.4.0", "files": {"../server.py": "0" * 64}}, 400),
-            ({"version": "0.4.0", "files": {"state/capability": "0" * 64}}, 403),
-            ({"version": "0.4.0", "files": {"server.py": "0" * 64}}, 400),
+            ({"version": "0.5.0", "files": {"../server.py": "0" * 64}}, 400),
+            ({"version": "0.5.0", "files": {"state/capability": "0" * 64}}, 403),
+            ({"version": "0.5.0", "files": {"server.py": "0" * 64}}, 400),
         ]
         for body, expected in cases:
             with self.subTest(body=body):
@@ -128,7 +128,7 @@ class RuntimeBridgeApiTests(unittest.TestCase):
                 link.symlink_to(outside)
             except (OSError, NotImplementedError):
                 return
-            body = {"version": "0.4.0", "files": {"server.py": hashlib.sha256(b"fixture").hexdigest()}}
+            body = {"version": "0.5.0", "files": {"server.py": hashlib.sha256(b"fixture").hexdigest()}}
             status, _ = self.request("POST", "/api/runtime/update", body=body)
             self.assertEqual(status, 403)
 
@@ -206,7 +206,7 @@ class RuntimeBridgeApiTests(unittest.TestCase):
         if os.name != "nt":
             self.assertEqual(os.stat(report).st_mode & 0o777, 0o600)
         self.assertEqual(target.read_text(encoding="utf-8"), "new fixture source")
-        backup = next((self.root / "state" / "backups").glob("0.4.0-*/harness.sqlite3"))
+        backup = next((self.root / "state" / "backups").glob("0.5.0-*/harness.sqlite3"))
         self.assertTrue(backup.is_file())
         self.assertFalse(any((self.root / "state" / "backups").rglob("provider.json")))
         self.assertEqual(fixture.starts, 1)

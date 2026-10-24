@@ -7,6 +7,7 @@ import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HashMap;
@@ -87,6 +88,12 @@ final class DeviceHttpBridge {
             if (cap.length() < 32 || supplied == null || !MessageDigest.isEqual(("Bearer " + cap).getBytes(StandardCharsets.UTF_8), supplied.getBytes(StandardCharsets.UTF_8))) { reply(client, 401, error("unauthorized", "本机服务尚未配对或认证失败")); return; }
             if ("GET".equals(start[0]) && "/api/device/status".equals(start[1])) { reply(client, 200, DeviceState.status(service)); return; }
             if ("GET".equals(start[0]) && "/api/device/approvals".equals(start[1])) { reply(client, 200, new JSONObject().put("approvals", DeviceState.approvalList())); return; }
+            if ("GET".equals(start[0]) && start[1].startsWith("/api/device/apps")) {
+                CatalogArgs args = parseCatalogArgs(start[1]);
+                if (args == null) { reply(client, 400, error("invalid_request", "应用目录查询参数无效")); return; }
+                reply(client, 200, AppCatalog.list(service, args.query, args.limit));
+                return;
+            }
             boolean approvalDecision = start[1].matches("/api/device/approvals/[a-fA-F0-9-]{36}");
             if (!"POST".equals(start[0]) || (!"/api/device/execute".equals(start[1]) && !approvalDecision)) { reply(client, 404, error("not_found", "接口不存在")); return; }
             String mime = headers.get("content-type");
@@ -147,6 +154,40 @@ final class DeviceHttpBridge {
     }
     private String Base64Digest(byte[] bytes) throws Exception {
         return android.util.Base64.encodeToString(MessageDigest.getInstance("SHA-256").digest(bytes), android.util.Base64.NO_WRAP);
+    }
+    private static final class CatalogArgs {
+        final String query;
+        final int limit;
+        CatalogArgs(String query, int limit) { this.query = query; this.limit = limit; }
+    }
+    private static CatalogArgs parseCatalogArgs(String target) {
+        String[] parts = target.split("\\?", -1);
+        if (parts.length > 2 || !"/api/device/apps".equals(parts[0])) return null;
+        String query = "";
+        int limit = AppCatalog.DEFAULT_LIMIT;
+        boolean seenQuery = false, seenLimit = false;
+        if (parts.length == 2 && !parts[1].isEmpty()) {
+            for (String pair : parts[1].split("&", -1)) {
+                int equals = pair.indexOf('=');
+                if (equals < 1) return null;
+                String key, value;
+                try {
+                    key = URLDecoder.decode(pair.substring(0, equals), "UTF-8");
+                    value = URLDecoder.decode(pair.substring(equals + 1), "UTF-8");
+                } catch (Exception ignored) { return null; }
+                if ("query".equals(key) && !seenQuery) {
+                    if (value.length() > 80) return null;
+                    query = value;
+                    seenQuery = true;
+                } else if ("limit".equals(key) && !seenLimit) {
+                    if (!value.matches("[0-9]{1,3}")) return null;
+                    try { limit = Integer.parseInt(value); } catch (Exception ignored) { return null; }
+                    if (limit < 1 || limit > AppCatalog.MAX_LIMIT) return null;
+                    seenLimit = true;
+                } else return null;
+            }
+        }
+        return new CatalogArgs(query, limit);
     }
     private static String readHeader(InputStream input) throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream();

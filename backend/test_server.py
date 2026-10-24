@@ -12,6 +12,7 @@ import unittest
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from unittest.mock import MagicMock, Mock, patch
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -164,6 +165,36 @@ class HarnessTests(unittest.TestCase):
         if self.engine is not self.harness.engine: self.engine.close()
         self.harness.store.db.close()
         self.temp.cleanup()
+
+    def test_submit_request_id_is_durable_and_replay_precedes_capacity_or_offline_checks(self):
+        body={"prompt":"delegated task", "title":"delegation", "clientRequestId":"voice-request-001"}
+        with patch.object(self.harness, "_run_task"):
+            first=self.harness.start_task(body)
+            second=self.harness.start_task(body)
+        self.assertEqual(first["id"],second["id"])
+        with self.assertRaisesRegex(ValueError,"不同任务"):
+            self.harness.start_task({**body,"prompt":"different task"})
+        with patch.object(self.harness, "engine", None):
+            self.assertEqual(self.harness.start_task(body)["id"],first["id"])
+        self.harness.store.db.close()
+        self.harness.store=server.Store(self.root/"state"/"harness.sqlite3")
+        self.assertEqual(self.harness.start_task(body)["id"],first["id"])
+        self.assertEqual(self.harness.store.db.execute("SELECT count(*) FROM tasks").fetchone()[0],1)
+
+    def test_new_thread_receives_owner_policy_and_phone_facts_without_replacing_user_prompt(self):
+        self.harness.phone_context.instructions=Mock(return_value="\nPHONE_FACTS: installed com.autonavi.minimap")
+        with patch.object(self.engine,"request",wraps=self.engine.request) as calls:
+            task=self.harness.start_task({"prompt":"find a nearby park"})
+            deadline=time.monotonic()+3
+            while time.monotonic()<deadline and self.harness.store.row(task["id"])["status"] in ("queued","running"):
+                time.sleep(.01)
+        start=next(c for c in calls.call_args_list if c.args[0]=="thread/start")
+        policy=start.args[1]["developerInstructions"]
+        self.assertIn("PHONE_FACTS",policy)
+        self.assertIn("INSTALLED",policy)
+        self.assertIn("one-tap login",policy)
+        turn=next(c for c in calls.call_args_list if c.args[0]=="turn/start")
+        self.assertEqual(turn.args[1]["input"][0]["text"],"find a nearby park")
 
     def insert_running_task(self, task_id):
         stamp = server.now()
@@ -619,10 +650,12 @@ for line in sys.stdin:
         self.harness.store.update(task_id, turn_id="turn-fixture")
         self.harness._steer_waiting(task_id, "turn-fixture")
         self.assertEqual(self.harness.store.message_by_client(task_id, "client-1")["status"], "steered")
-        _, duplicate, delivery = self.harness.send_message(task_id, {"text":"different replay body", "clientMessageId":"client-1"})
+        _, duplicate, delivery = self.harness.send_message(task_id, {"text":"queued while starting", "clientMessageId":"client-1"})
         self.assertEqual(delivery, "steered")
         self.assertEqual(duplicate["id"], message["id"])
         self.assertEqual(duplicate["text"], "queued while starting")
+        with self.assertRaisesRegex(ValueError, "different message text"):
+            self.harness.send_message(task_id, {"text":"different replay body", "clientMessageId":"client-1"})
         self.assertEqual(sum(e.get("method") == "fixture/steered" for e in self.events), 1)
         with self.assertRaisesRegex(ValueError, "expectedTurnId"):
             self.harness.send_message(task_id, {"text":"wrong turn", "clientMessageId":"client-2", "expectedTurnId":"stale"})
@@ -761,7 +794,66 @@ for line in sys.stdin:
             with urllib.request.urlopen(req) as response:
                 result = json.loads(response.read())
                 self.assertTrue(result["engine"]["connected"])
-                self.assertEqual(result["app"], {"name":"DAXQO", "version":"0.4.0"})
+                self.assertEqual(result["app"], {"name":"DAXQO", "version":"0.5.0"})
+        finally:
+            http.shutdown(); http.server_close()
+
+    def test_assistant_task_result_http_paginates_with_strict_authenticated_query(self):
+        task_id = str(uuid.uuid4())
+        stamp = server.now()
+        result_text = "0123456789" + "x" * (9 * 1024 * 1024)
+        with self.harness.store.db:
+            self.harness.store.db.execute(
+                "INSERT INTO tasks(id,title,prompt,status,created_at,updated_at,result,error) VALUES(?,?,?,?,?,?,?,?)",
+                (task_id, "private title", "PRIVATE_PROMPT", "completed", stamp, stamp, result_text, "apiKey=PRIVATE_KEY"))
+        for index in range(7):
+            self.harness.store.progress(task_id, "phase", {"phase": f"phase-{index}", "summary": "PRIVATE_PROGRESS"})
+
+        http = ThreadingHTTPServer(("127.0.0.1", 0), server.create_handler(self.harness))
+        self.harness.port = http.server_port
+        thread = threading.Thread(target=http.serve_forever, daemon=True); thread.start()
+        base = f"http://127.0.0.1:{http.server_port}"
+        headers = {"Authorization": "Bearer " + self.harness.capability,
+                   "Host": f"127.0.0.1:{http.server_port}"}
+
+        def get(query, *, auth=True):
+            request_headers = dict(headers) if auth else {"Host": headers["Host"]}
+            request = urllib.request.Request(base + f"/api/assistant/tasks/{task_id}" + query, headers=request_headers)
+            return urllib.request.urlopen(request, timeout=3)
+
+        try:
+            with get("?offset=0") as response:
+                default_page = json.loads(response.read())
+            self.assertEqual(len(default_page["result"]["text"]), 2000)
+            self.assertEqual(default_page["resultNextOffset"], 2000)
+            with get("?offset=8&limit=8") as response:
+                page = json.loads(response.read())
+            self.assertEqual(page["result"], {"text": "89xxxxxx", "offset": 8, "totalLength": len(result_text),
+                                               "truncated": True, "nextOffset": 16})
+            self.assertEqual(page["resultNextOffset"], 16)
+            self.assertEqual(page["activity"]["phase"], "phase-6")
+            self.assertEqual(page["progress"][-1]["phase"], "phase-6")
+            public_text = json.dumps(page)
+            for private in ("PRIVATE_PROMPT", "PRIVATE_PROGRESS", "PRIVATE_KEY", "events", "liveMessage", "agents", "context"):
+                self.assertNotIn(private, public_text)
+
+            # A result larger than the former response cap remains addressable by page.
+            large_offset = 9 * 1024 * 1024
+            with get(f"?offset={large_offset}&limit=8000") as response:
+                final = json.loads(response.read())
+            self.assertEqual(len(final["result"]["text"]), 10)
+            self.assertFalse(final["result"]["truncated"])
+            self.assertIsNone(final["resultNextOffset"])
+
+            for query in ("?limit=0", "?limit=8001", "?offset=-1", "?offset=x", "?limit=1&limit=2",
+                          "?offset=0&limit=1&other=x", "?offset=1&", "?offset=0&limit="):
+                with self.subTest(query=query):
+                    with self.assertRaises(urllib.error.HTTPError) as raised:
+                        get(query)
+                    self.assertEqual(raised.exception.code, 400)
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                get("?limit=1", auth=False)
+            self.assertEqual(raised.exception.code, 401)
         finally:
             http.shutdown(); http.server_close()
 
@@ -919,7 +1011,7 @@ for line in sys.stdin:
             self.assertEqual(model["multi_agent_version"], "v1")
             self.assertFalse(model["supports_search_tool"])
 
-    def test_android_mcp_preapproval_is_limited_to_fixed_adapter_and_three_tools(self):
+    def test_android_mcp_preapproval_is_limited_to_fixed_adapter_and_four_tools(self):
         self.harness._write_codex_config()
         config = (self.harness.codex_home / "config.toml").read_text(encoding="utf-8")
         self.assertIn('approval_policy = "on-request"', config)
@@ -928,13 +1020,13 @@ for line in sys.stdin:
         self.assertIn("command = " + json.dumps(sys.executable), block)
         self.assertIn("args = " + json.dumps([str(Path(server.__file__).resolve().parent / "android_mcp_server.py"),
             "--state-dir", str(self.harness.state), "--port", "18883"]), block)
-        self.assertIn('enabled_tools = ["android_status", "android_observe", "android_action"]', block)
+        self.assertIn('enabled_tools = ["android_status", "android_apps", "android_observe", "android_action"]', block)
         self.assertGreaterEqual(int(next(line.split("=", 1)[1] for line in block.splitlines()
             if line.startswith("tool_timeout_sec"))), 2 * android_mcp.HTTP_TIMEOUT)
         self.assertIn('default_tools_approval_mode = "prompt"', block)
-        for tool in ("android_status", "android_observe", "android_action"):
+        for tool in ("android_status", "android_apps", "android_observe", "android_action"):
             self.assertIn("[mcp_servers.daxqo_android.tools." + tool + ']\napproval_mode = "approve"', config)
-        self.assertEqual(config.count('approval_mode = "approve"'), 3)
+        self.assertEqual(config.count('approval_mode = "approve"'), 4)
         self.assertNotIn(self.harness.capability, config)
 
     def test_android_mcp_progress_exposes_bounded_error_without_tool_arguments(self):
@@ -1069,6 +1161,28 @@ for line in sys.stdin:
             self.assertEqual(len(history), 1)
             self.assertEqual(history[0]["text"], "steer over HTTP")
             self.assertEqual(history[0]["status"], "steered")
+
+            rejected = server.RpcError("fixture rejected before delivery")
+            rejected.rpc_rejected = True
+            retry_request = Mock(side_effect=rejected)
+            with patch.object(self.engine, "request", retry_request):
+                request = urllib.request.Request(base + "/api/tasks/http-messages/messages",
+                    data=json.dumps({"text":"safe retry", "clientMessageId":"http-retry", "retry":False}).encode(),
+                    headers=headers, method="POST")
+                with self.assertRaises(urllib.error.HTTPError) as failed:
+                    urllib.request.urlopen(request, timeout=2)
+                self.assertEqual(failed.exception.code, 400)
+            self.assertEqual(self.harness.store.message_by_client("http-messages", "http-retry")["retry_safe"], 1)
+
+            successful_retry = Mock(return_value={})
+            with patch.object(self.engine, "request", successful_retry):
+                request = urllib.request.Request(base + "/api/tasks/http-messages/messages",
+                    data=json.dumps({"text":"safe retry", "clientMessageId":"http-retry", "retry":True}).encode(),
+                    headers=headers, method="POST")
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    retried = json.loads(response.read())
+            self.assertEqual(retried["delivery"], "steered")
+            successful_retry.assert_called_once()
         finally:
             http.shutdown(); http.server_close()
 

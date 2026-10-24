@@ -82,7 +82,7 @@ final class DeviceState {
             PowerManager power = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
             DeviceAccessibilityService service = DeviceAccessibilityService.current;
             LockState lock = lockState(context);
-            result.put("version", "0.4.0");
+            result.put("version", context.getPackageManager().getPackageInfo(context.getPackageName(), 0).versionName);
             PlatformProfile profile = PlatformProfile.fromId(context.getString(R.string.platform_id));
             result.put("platformId", profile.id);
             result.put("device", new JSONObject().put("manufacturer", android.os.Build.MANUFACTURER)
@@ -108,6 +108,7 @@ final class DeviceState {
             result.put("screenOn", power != null && power.isInteractive());
             result.put("batteryOptimizationsIgnored", power != null && power.isIgnoringBatteryOptimizations(context.getPackageName()));
             result.put("screenshotSupported", android.os.Build.VERSION.SDK_INT >= 30);
+            result.put("appsSupported", true);
             result.put("cursorInputMethodSupported", service != null && service.cursorInputMethodSupported());
             result.put("bridgeListening", service != null && service.bridgeListening());
             result.put("packageName", service == null ? "" : service.foregroundPackage());

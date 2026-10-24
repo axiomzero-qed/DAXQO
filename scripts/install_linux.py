@@ -26,7 +26,7 @@ from urllib.request import (HTTPRedirectHandler, ProxyHandler, Request,
                             build_opener)
 
 VERSION = "0.163.0"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 REGISTRY = "registry.npmjs.org"
 BACKEND_PORT = 18880
 FLAT_FILES = (
@@ -36,9 +36,9 @@ FLAT_FILES = (
     "task_services.py", "test_task_services.py",
     "android_mcp_server.py", "test_android_mcp.py", "phone_backends.py", "test_phone_backends.py",
     "remote_protocol.py", "test_remote_protocol.py", "email_control.py", "test_email_control.py",
-    "test_remote_email_mcp.py",
+    "test_remote_email_mcp.py", "agent_context.py", "test_agent_context.py", "assistant_mcp_server.py", "test_assistant_mcp.py",
 )
-SCRIPT_FLAT_FILES = ("remote_email_mcp.py",)
+SCRIPT_FLAT_FILES = ("remote_email_mcp.py", "assistant_client.py", "test_assistant_client.py", "install_assistant_skill.py", "test_install_assistant_skill.py")
 SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
 MAX_METADATA = 4 * 1024 * 1024
 MAX_TARBALL = 1024 * 1024 * 1024
@@ -162,6 +162,10 @@ def _source_files(repo: Path) -> list[tuple[Path, str]]:
             raise InstallError(f"Required script source is missing or unsafe: {name}")
         files.append((source, name))
     static = backend / "static"
+    skill = repo / "skills" / "daxqo-handoff" / "SKILL.md"
+    if not _regular_file(skill):
+        raise InstallError("DAXQO handoff Skill source is missing or unsafe")
+    files.append((skill, "daxqo_handoff_SKILL.md"))
     if static.is_symlink() or not static.is_dir():
         raise InstallError("backend/static is missing or unsafe")
     for current, directories, names in os.walk(static, followlinks=False):

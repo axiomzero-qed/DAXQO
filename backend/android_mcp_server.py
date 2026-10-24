@@ -13,6 +13,7 @@ import re
 import stat
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from typing import Any, BinaryIO
@@ -165,6 +166,14 @@ class AndroidBridge:
     def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         route = (method, path) in (("GET", "/api/device/status"), ("GET", "/api/device/approvals"),
                                   ("POST", "/api/device/execute"))
+        if method == "GET" and path.startswith("/api/device/apps"):
+            parts = urllib.parse.urlsplit(path)
+            try:
+                query = urllib.parse.parse_qs(parts.query, keep_blank_values=True, strict_parsing=True, max_num_fields=2)
+                route = (parts.path == "/api/device/apps" and not parts.fragment and not parts.netloc
+                         and set(query) <= {"query", "limit"} and all(len(v) == 1 for v in query.values()))
+            except ValueError:
+                route = False
         owner_decision = method == "POST" and re.fullmatch(
             r"/api/device/approvals/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", path)
         if not route and not owner_decision:
@@ -209,6 +218,11 @@ class AndroidBridge:
     def status(self) -> dict[str, Any]:
         return _public_value(self.request("GET", "/api/device/status"))
 
+    def apps(self, query: str = "", limit: int = 80) -> dict[str, Any]:
+        if not isinstance(query, str) or len(query) > 80 or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise BridgeError("invalid_args", "App query must be at most 80 characters and limit 1..200")
+        return _public_value(self.request("GET", "/api/device/apps?" + urllib.parse.urlencode({"query": query, "limit": limit})))
+
     def execute(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
         envelope = {"id": request_id, "action": action, "args": args}
@@ -236,6 +250,9 @@ class AndroidBridge:
 
 
 TOOL_DEFINITIONS = [
+    {"name": "android_apps", "description": "Find already-installed, enabled launcher apps by name or package before opening a store or browser. Read-only metadata; no accounts, phone number, private content or location. An unavailable/truncated catalog is not proof an app is absent.",
+     "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+     "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "maxLength": 80}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}}, "additionalProperties": False}},
     {"name": "android_status", "description": "Read phone/control readiness, policy, device and installed appStores (OEM first, third-party last), with preferredAppStore when available. Read once initially, then only when readiness changes. Does not change device state.",
      "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
@@ -335,6 +352,8 @@ class AndroidMCP:
     def call_tool(self, name: str, args: Any) -> dict[str, Any]:
         if not isinstance(args, dict):
             raise BridgeError("invalid_args", "Tool arguments must be an object")
+        if name == "android_apps":
+            return self._tool_result([self._text(self.bridge.apps(args.get("query", ""), args.get("limit", 80)))])
         if name == "android_status":
             return self._tool_result([self._text(self.bridge.status())])
         if name == "android_observe":
