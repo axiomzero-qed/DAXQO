@@ -34,10 +34,12 @@ def require(condition: bool, message: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=("standard", "xm"), default="standard")
+    parser.add_argument("--version-code", type=int, default=14)
     parser.add_argument("--java-home", type=Path, default=os.environ.get("JAVA_HOME"))
     parser.add_argument("--sdk-root", type=Path,
                         default=os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT"))
     args = parser.parse_args()
+    require(1 <= args.version_code <= 2_100_000_000, "Expected Android version code is outside its supported range.")
     require(args.sdk_root is not None, "Set ANDROID_HOME or pass --sdk-root.")
     sdk = Path(args.sdk_root)
     suffix = ".exe" if os.name == "nt" else ""
@@ -57,6 +59,7 @@ def main() -> None:
         ("PlatformProfileRegression", [source / "platform/PlatformProfile.java"]),
         ("io.daxqo.app.NodeSnapshotRegression", [source / "NodeSnapshot.java"]),
         ("io.daxqo.app.TextInputRegression", [source / "TextInputEdit.java"]),
+        ("io.daxqo.app.VoiceTranscriptAccumulatorRegression", [source / "VoiceTranscriptAccumulator.java"]),
         ("io.daxqo.app.ApprovalLedgerRegression", []),
         ("io.daxqo.app.PassiveCallbacksRegression", []),
     )
@@ -75,7 +78,7 @@ def main() -> None:
     if args.platform == "xm":
         version += "-xm"
     badging = run([tools / ("aapt" + suffix), "dump", "badging", apk], capture=True)
-    require(re.search(r"^package: name='" + re.escape(package) + r"' versionCode='11' versionName='"
+    require(re.search(r"^package: name='" + re.escape(package) + r"' versionCode='" + str(args.version_code) + r"' versionName='"
                       + re.escape(version) + "'", badging, re.M) is not None,
             "Packaged app ID/version does not match the selected platform.")
     manifest = run([tools / ("aapt2" + suffix), "dump", "xmltree", apk,

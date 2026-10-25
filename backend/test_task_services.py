@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import ctypes
+import os
 import errno
 import json
 import io
@@ -206,6 +208,110 @@ class PrepareBodyFixtureTests(TaskServicesFixtureCase):
         with self.assertRaisesRegex(ValueError, "附件不存在"):
             self.services.prepare_body(forged)
         self.assertEqual(forged["text"], "read")
+
+    def make_task_workspace(self):
+        task_id = "4c51e087-3ca2-4b9a-9840-4383f6cd1e17"
+        task_workspace = self.workspace / "tasks" / task_id
+        task_workspace.mkdir(parents=True)
+        return task_workspace, f"tasks/{task_id}"
+
+    def test_task_workspace_copies_upload_and_reprepare_is_idempotent(self):
+        attachment = self.upload(b"task-local attachment", name="报告.txt")
+        task_workspace, task_rel = self.make_task_workspace()
+        original = {"text": "请查看附件", "attachments": [attachment["id"]]}
+        first = self.services.prepare_body(original, task_workspace=task_workspace)
+        second = self.services.prepare_body(first, task_workspace=task_workspace)
+        relative = f"{task_rel}/inputs/{attachment['id']}_报告.txt"
+        target = task_workspace / "inputs" / f"{attachment['id']}_报告.txt"
+        source = self.workspace / attachment["path"]
+
+        self.assertEqual(original["text"], "请查看附件")
+        self.assertEqual(first, second)
+        self.assertEqual(first["text"].count("本次导入的附件"), 1)
+        self.assertIn(json.dumps(str(target.resolve(strict=True)), ensure_ascii=False), first["text"])
+        self.assertEqual(first["_displayText"], "请查看附件")
+        self.assertEqual(first["_attachments"][0]["path"], relative)
+        self.assertEqual(target.read_bytes(), b"task-local attachment")
+        self.assertEqual(source.read_bytes(), b"task-local attachment")
+        self.assertEqual(len(list((task_workspace / "inputs").iterdir())), 1)
+
+    def test_task_workspace_accepts_windows_short_path_alias(self):
+        if os.name != "nt":
+            self.skipTest("Windows 8.3 path aliases are only available on Windows")
+        attachment = self.upload(b"short alias", name="alias.txt")
+        task_workspace, _ = self.make_task_workspace()
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(str(self.workspace), buffer, len(buffer))
+        if not length or length >= len(buffer):
+            self.skipTest("GetShortPathNameW could not resolve this workspace path")
+        short_root = Path(buffer.value)
+        if short_root == self.workspace:
+            self.skipTest("The workspace volume does not provide a distinct 8.3 alias")
+        short_task_workspace = short_root / task_workspace.relative_to(self.workspace)
+        configured_workspace = self.harness.workspace
+        self.harness.workspace = short_root
+        try:
+            prepared = self.services.prepare_body({"text": "read", "attachments": [attachment["id"]]},
+                                                  task_workspace=short_task_workspace)
+        finally:
+            self.harness.workspace = configured_workspace
+        self.assertEqual(prepared["_attachments"][0]["path"],
+                         f"tasks/4c51e087-3ca2-4b9a-9840-4383f6cd1e17/inputs/{attachment['id']}_alias.txt")
+        self.assertEqual((task_workspace / "inputs" / f"{attachment['id']}_alias.txt").read_bytes(), b"short alias")
+
+    def test_task_copy_refuses_modified_destination_without_overwriting(self):
+        attachment = self.upload(b"original bytes", name="keep.bin")
+        task_workspace, _ = self.make_task_workspace()
+        body = self.services.prepare_body({"text": "read", "attachments": [attachment["id"]]},
+                                          task_workspace=task_workspace)
+        destination = task_workspace / "inputs" / f"{attachment['id']}_keep.bin"
+        destination.write_bytes(b"user edited")
+        with self.assertRaisesRegex(ValueError, "已被修改，拒绝覆盖"):
+            self.services.prepare_body(body, task_workspace=task_workspace)
+        self.assertEqual(destination.read_bytes(), b"user edited")
+
+    def test_task_copy_verifies_upload_size_and_sha_before_creating_copy(self):
+        task_workspace, _ = self.make_task_workspace()
+        for changed, expected_error in ((b"tampered", "大小与上传记录不符"),
+                                        (b"changed", "内容与上传记录不符")):
+            attachment = self.upload(b"trusted", name="source.bin")
+            source = self.workspace / attachment["path"]
+            source.write_bytes(changed)
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, expected_error):
+                self.services.prepare_body({"text": "read", "attachments": [attachment["id"]]},
+                                           task_workspace=task_workspace)
+        self.assertFalse((task_workspace / "inputs").exists())
+
+    def test_task_workspace_and_upload_paths_reject_escape(self):
+        attachment = self.upload(b"safe", name="safe.bin")
+        outside = Path(self.temp.name) / "outside"
+        outside.mkdir()
+        with self.assertRaisesRegex(ValueError, "位于本机工作区内"):
+            self.services.prepare_body({"text": "read", "attachments": [attachment["id"]]},
+                                       task_workspace=outside)
+        with self.harness.store.db:
+            self.harness.store.db.execute("UPDATE uploads SET path=? WHERE id=?",
+                                          ("imports/../outside.bin", attachment["id"]))
+        task_workspace, _ = self.make_task_workspace()
+        with self.assertRaisesRegex(ValueError, "附件路径无效"):
+            self.services.prepare_body({"text": "read", "attachments": [attachment["id"]]},
+                                       task_workspace=task_workspace)
+
+    def test_task_input_directory_symlink_is_rejected(self):
+        attachment = self.upload(b"safe", name="safe.bin")
+        task_workspace, _ = self.make_task_workspace()
+        outside = Path(self.temp.name) / "outside-inputs"
+        outside.mkdir()
+        try:
+            (task_workspace / "inputs").symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            if exc.errno in (errno.EPERM, errno.EACCES) or getattr(exc, "winerror", None) == 1314:
+                self.skipTest("symlink creation is disabled by this Windows environment")
+            raise
+        with self.assertRaisesRegex(ValueError, "不能是链接"):
+            self.services.prepare_body({"text": "read", "attachments": [attachment["id"]]},
+                                       task_workspace=task_workspace)
+        self.assertEqual(list(outside.iterdir()), [])
 
 
 class ScheduleFixtureTests(TaskServicesFixtureCase):

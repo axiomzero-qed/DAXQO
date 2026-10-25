@@ -559,6 +559,7 @@ class Store:
             self.db.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, prompt TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, thread_id TEXT, model TEXT, result TEXT, error TEXT, stop_requested INTEGER NOT NULL DEFAULT 0)")
             columns = {row[1] for row in self.db.execute("PRAGMA table_info(tasks)")}
             if "turn_id" not in columns: self.db.execute("ALTER TABLE tasks ADD COLUMN turn_id TEXT")
+            if "workspace_path" not in columns: self.db.execute("ALTER TABLE tasks ADD COLUMN workspace_path TEXT")
             self.db.execute("CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, type TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(task_id) REFERENCES tasks(id))")
             self.db.execute("CREATE TABLE IF NOT EXISTS progress (seq INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(task_id) REFERENCES tasks(id))")
             self.db.execute("CREATE TABLE IF NOT EXISTS task_requests (request_id TEXT PRIMARY KEY, digest TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id))")
@@ -666,6 +667,7 @@ class Store:
         item = {"id": row["id"], "title": row["title"], "status": row["status"], "createdAt": row["created_at"], "updatedAt": row["updated_at"]}
         for source, target in (("thread_id", "threadId"), ("model", "model"), ("error", "error")):
             if row.get(source): item[target] = row[source]
+        item["workspacePath"] = row.get("workspace_path") or ""
         if detail:
             item["prompt"] = row["prompt"]
             if row.get("result") is not None: item["result"] = row["result"]
@@ -864,7 +866,7 @@ class Harness:
         return {"activity": {"phase": phase, "lastEventAt": created, "elapsedSeconds": elapsed,
                              "quietSeconds": quiet, "summary": self.safe_text(summary, 300)},
                 "context": context, "agents": list(agent_rows.values()),
-                "progress": events, "artifacts": self.result_artifacts(row.get("result") or ""),
+                "progress": events, "artifacts": self.result_artifacts(row.get("result") or "", task_id=row["id"]),
                 **({"liveMessage": self.safe_text(latest_live, 2000)} if latest_live else {})}
 
     def _save_provider_file(self) -> None:
@@ -1021,15 +1023,50 @@ class Harness:
     def read_workspace_download(self, relative: str) -> tuple[str, bytes]:
         return read_file(self.resolve_workspace_path, relative, MAX_DOWNLOAD_FILE)
 
-    def result_artifacts(self, text: str, *, expand_dirs: bool = False) -> list[dict]:
-        try: return referenced_files(text, self.workspace, self.resolve_workspace_path, expand_dirs=expand_dirs)
-        except OSError: return []
+    def task_workspace(self, row: dict[str, Any], *, create: bool = False) -> Path:
+        """Keep old threads in their original root; allocate stable directories for new ones."""
+        root = self.workspace.resolve(strict=True)
+        relative = row.get("workspace_path")
+        if not relative: return root
+        ident = row.get("id", "")
+        if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", ident) or relative != "tasks/" + ident:
+            raise ValueError("Invalid task workspace")
+        folder = root
+        for part in ("tasks", ident):
+            folder = folder / part
+            if folder.is_symlink(): raise ValueError("Task workspace must not be a link")
+            if create: folder.mkdir(mode=0o700, exist_ok=True)
+            if not folder.is_dir() or folder.resolve(strict=True) != folder:
+                raise ValueError("Task workspace is unavailable")
+        return folder
+
+    def result_artifacts(self, text: str, *, expand_dirs: bool = False, task_id: str | None = None) -> list[dict]:
+        try:
+            row = self.store.row(task_id) if task_id else None
+            if task_id and not row: return []
+            prefix = (row or {}).get("workspace_path")
+            if not prefix:
+                return referenced_files(text, self.workspace, self.resolve_workspace_path, expand_dirs=expand_dirs)
+            root = self.task_workspace(row)
+            def resolve(relative: str) -> tuple[Path, str]:
+                # Accept our own GUI links as well as paths relative to the task's cwd.
+                if relative == prefix: relative = ""
+                elif relative.startswith(prefix + "/"): relative = relative[len(prefix) + 1:]
+                path, _ = self.resolve_workspace_path(prefix + "/" + relative)
+                if path != root and root not in path.parents:
+                    raise ValueError("Artifact must stay inside this task workspace")
+                return path, path.relative_to(root).as_posix()
+            items = referenced_files(text, root, resolve, expand_dirs=expand_dirs)
+            for item in items:
+                item["path"] = prefix if item["path"] == "." else prefix + "/" + item["path"]
+            return items
+        except (OSError, ValueError): return []
 
     def task_messages(self, task_id: str) -> list[dict]:
         messages = self.store.messages(task_id)
         for message in messages:
             if message.get("role") == "assistant":
-                message["artifacts"] = self.result_artifacts(message.get("text") or "")
+                message["artifacts"] = self.result_artifacts(message.get("text") or "", task_id=task_id)
         return messages
 
     def read_workspace_preview(self, relative: str) -> tuple[str, bytes]:
@@ -1608,7 +1645,7 @@ class Harness:
         if e and e.account_error: account["error"] = e.account_error
         active_rows = self.store.active_rows()
         active = next((r for r in active_rows if r["id"] == self.active_task_id), active_rows[0] if active_rows else None)
-        return {"app": {"name": "DAXQO", "version": "0.6.1"}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
+        return {"app": {"name": "DAXQO", "version": "0.6.2"}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
                 "engine": {"installed": bool(self.engine_path or self.engine), "version": e.version if e else None, "connected": bool(e and e.connected)},
                 "account": account, "activeTaskId": active["id"] if active else None, "activeTaskIds": [r["id"] for r in active_rows],
                 "workspace": str(self.workspace),
@@ -1642,8 +1679,11 @@ class Harness:
         finally:
             if not _provider_update or not was_reconnecting: self.reconnecting = False
 
-    def _phone_thread_instructions(self) -> str:
-        return agent_instructions(max(1, min(4, int(self.services.settings.get("maxSubagents", 2))))) + self.phone_context.instructions()
+    def _phone_thread_instructions(self, row: dict[str, Any] | None = None) -> str:
+        instructions = agent_instructions(max(1, min(4, int(self.services.settings.get("maxSubagents", 2))))) + self.phone_context.instructions()
+        if row and row.get("workspace_path"):
+            instructions += "\nThis conversation's working directory is " + json.dumps(str(self.task_workspace(row)), ensure_ascii=False) + ". Save its work and deliverables here and link outputs relative to this directory. Other conversations have separate directories; do not use them unless the user explicitly requests it.\n"
+        return instructions
 
     def _prior_request(self, request_id, digest):
         if not request_id: return None
@@ -1700,9 +1740,14 @@ class Harness:
                     title = "附件：" + short_text(first_name or "已导入文件", 80)
                 else:
                     title = prompt.strip().splitlines()[0][:100]
+                workspace_path = "tasks/" + tid
+                task_folder = self.task_workspace({"id": tid, "workspace_path": workspace_path}, create=True)
+                body = self.services.prepare_body(body, task_workspace=task_folder)
+                prompt = body["prompt"]
+                attachments = body.get("_attachments")
                 with self.store.lock, self.store.db:
                     chosen_model = body.get("model") or (self.provider["model"] if self.provider_configured() else None)
-                    self.store.db.execute("INSERT INTO tasks(id,title,prompt,status,created_at,updated_at,model) VALUES(?,?,?,?,?,?,?)", (tid, short_text(title, 200), prompt[:50000], "queued", stamp, stamp, chosen_model))
+                    self.store.db.execute("INSERT INTO tasks(id,title,prompt,status,created_at,updated_at,model,workspace_path) VALUES(?,?,?,?,?,?,?,?)", (tid, short_text(title, 200), prompt[:50000], "queued", stamp, stamp, chosen_model, workspace_path))
                     if request_id:
                         self.store.db.execute("INSERT INTO task_requests(request_id,digest,task_id) VALUES(?,?,?)", (request_id, digest, tid))
                 display_prompt = body.get("_displayText")
@@ -1723,12 +1768,13 @@ class Harness:
         self.store.event(task_id, "status", "running")
         self.store.progress(task_id, "phase", {"phase": "running", "summary": "正在执行"})
         try:
-            instructions = self._phone_thread_instructions()
+            task_folder = self.task_workspace(row)
+            instructions = self._phone_thread_instructions(row)
             if resume:
                 thread_id = row["thread_id"]
-                engine.request("thread/resume", {"threadId": thread_id, "sandbox": self.sandbox, "approvalPolicy": "on-request", "developerInstructions": instructions})
+                engine.request("thread/resume", {"threadId": thread_id, "cwd": str(task_folder), "sandbox": self.sandbox, "approvalPolicy": "on-request", "developerInstructions": instructions})
             else:
-                params: dict[str, Any] = {"cwd": str(self.workspace), "approvalPolicy": "on-request", "sandbox": self.sandbox, "developerInstructions": instructions}
+                params: dict[str, Any] = {"cwd": str(task_folder), "approvalPolicy": "on-request", "sandbox": self.sandbox, "developerInstructions": instructions}
                 if row.get("model"): params["model"] = row["model"]
                 result = engine.request("thread/start", params)
                 thread_id = result.get("thread", {}).get("id", result.get("threadId"))
@@ -1770,7 +1816,10 @@ class Harness:
             threading.Thread(target=self._start_waiting_queued, name="queued-tasks", daemon=True).start()
 
     def send_message(self, task_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str]:
-        body = self.services.prepare_body(body)
+        task_row = self.store.row(task_id)
+        if not task_row: raise KeyError("Task not found")
+        folder = self.task_workspace(task_row) if task_row.get("workspace_path") else None
+        body = self.services.prepare_body(body, task_workspace=folder)
         text = body.get("text")
         client_id = body.get("clientMessageId")
         retry = body.get("retry", False)
@@ -1908,7 +1957,7 @@ class Harness:
         try:
             if row["thread_id"] not in self._loaded_threads:
                 self.engine.request("thread/resume", {"threadId": row["thread_id"], "sandbox": self.sandbox,
-                    "approvalPolicy": "on-request", "developerInstructions": self._phone_thread_instructions()})
+                    "cwd": str(self.task_workspace(row)), "approvalPolicy": "on-request", "developerInstructions": self._phone_thread_instructions(row)})
                 self._loaded_threads.add(row["thread_id"])
             for message in pending: self.store.update_message(message["id"], status="sending", delivery="sending")
             result = self.engine.request("turn/start", {"threadId": row["thread_id"],

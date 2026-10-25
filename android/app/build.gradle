@@ -20,12 +20,48 @@ android {
         applicationId xmBuild ? 'io.daxqo.xm' : 'io.daxqo.app'
         minSdk 26
         targetSdk 35
-        versionCode 11
-        versionName xmBuild ? '0.6.1-xm' : '0.6.1'
+        versionCode 14
+        versionName xmBuild ? '0.6.2-xm' : '0.6.2'
         resValue 'string', 'app_name', xmBuild ? 'DAXQO for XM' : '达氙 DAXQO'
         resValue 'string', 'platform_id', xmBuild ? 'xm' : 'standard'
         resValue 'string', 'pairing_scheme', xmBuild ? 'daxqo-xm' : 'daxqo'
         resValue 'string', 'shortcut_target_package', xmBuild ? 'io.daxqo.xm' : 'io.daxqo.app'
         manifestPlaceholders = [pairingScheme: xmBuild ? 'daxqo-xm' : 'daxqo']
     }
+    packaging {
+        jniLibs {
+            // Compress all supported native ABIs in the standalone APK.
+            useLegacyPackaging = true
+        }
+    }
+}
+
+def voiceRuntimeDir = layout.buildDirectory.dir('generated/voice')
+def voiceAarFile = voiceRuntimeDir.map { it.file('libs/sherpa-onnx.aar') }
+def voiceAssetsDir = voiceRuntimeDir.map { it.dir('assets') }
+def prepareVoiceRuntime = tasks.register('prepareVoiceRuntime', Exec) {
+    def prepareScript = rootProject.file('tools/prepare_voice_runtime.py')
+    def args = ['python', prepareScript.absolutePath, '--output-dir', voiceRuntimeDir.get().asFile.absolutePath]
+    def cacheOverride = providers.gradleProperty('voiceCacheDir').orNull
+    if (cacheOverride) {
+        args += ['--cache-dir', cacheOverride]
+    }
+    commandLine args
+    inputs.file(prepareScript)
+    inputs.dir(rootProject.file('tools/licenses'))
+    outputs.dir(voiceRuntimeDir)
+    outputs.upToDateWhen { false }
+}
+
+android.sourceSets.main.assets.srcDir(voiceAssetsDir)
+
+def sherpaAarDependency = files(voiceAarFile).builtBy(prepareVoiceRuntime)
+dependencies {
+    implementation(sherpaAarDependency)
+    // sherpa-onnx v2.0.0 was compiled with Kotlin 1.7.10; its AAR does not bundle stdlib.
+    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.7.10'
+}
+
+tasks.named('preBuild').configure {
+    dependsOn(prepareVoiceRuntime)
 }

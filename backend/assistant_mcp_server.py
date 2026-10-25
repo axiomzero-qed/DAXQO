@@ -227,7 +227,7 @@ class AssistantMCP:
             if version not in (None, "2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"):
                 return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32602, "message": "Unsupported MCP protocol version"}}
             result = {"protocolVersion": version or "2024-11-05", "capabilities": {"tools": {}},
-                      "serverInfo": {"name": "daxqo-assistant-handoff", "version": "0.6.1"}}
+                      "serverInfo": {"name": "daxqo-assistant-handoff", "version": "0.6.2"}}
         elif method == "ping":
             result = {}
         elif method == "tools/list":

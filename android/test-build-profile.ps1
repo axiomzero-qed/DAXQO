@@ -20,13 +20,13 @@ if (!(Test-Path $aapt) -or !(Test-Path $analyzer) -or !(Test-Path (Join-Path $ja
 $env:JAVA_HOME = $javaDir
 $env:PATH = (Join-Path $javaDir 'bin') + ';' + $env:PATH
 $expected = if ($Platform -eq 'xm') {
-    @{ package = 'io.daxqo.xm'; version = '0.6.1-xm'; scheme = 'daxqo-xm'; target = 'io.daxqo.xm' }
+    @{ package = 'io.daxqo.xm'; version = '0.6.2-xm'; scheme = 'daxqo-xm'; target = 'io.daxqo.xm' }
 } else {
-    @{ package = 'io.daxqo.app'; version = '0.6.1'; scheme = 'daxqo'; target = 'io.daxqo.app' }
+    @{ package = 'io.daxqo.app'; version = '0.6.2'; scheme = 'daxqo'; target = 'io.daxqo.app' }
 }
 $badging = (& $aapt dump badging $apk 2>&1 | Out-String)
 if ($LASTEXITCODE -ne 0) { throw "aapt dump badging failed: $badging" }
-if ($badging -notmatch "(?m)^package: name='$([regex]::Escape($expected.package))' versionCode='11' versionName='$([regex]::Escape($expected.version))'") {
+if ($badging -notmatch "(?m)^package: name='$([regex]::Escape($expected.package))' versionCode='14' versionName='$([regex]::Escape($expected.version))'") {
     throw "APK package/version does not match $Platform profile."
 }
 $manifest = (& $aapt dump xmltree $apk AndroidManifest.xml 2>&1 | Out-String)

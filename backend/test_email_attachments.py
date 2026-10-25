@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import types
 import unittest
+import uuid
 from email.message import EmailMessage
 from unittest.mock import patch
 
@@ -61,6 +62,22 @@ class EmailAttachmentTests(unittest.TestCase):
         with self.harness.store.lock:
             return [dict(row) for row in self.harness.store.db.execute(
                 "SELECT * FROM mail_reply_parts ORDER BY part")]
+
+    def test_task_workspace_reply_attaches_only_its_own_same_named_output(self):
+        old_id = self._complete_owned_task("[result](same.txt)")
+        task_id, other_id = str(uuid.uuid4()), str(uuid.uuid4())
+        self.harness.task_workspace = types.MethodType(Harness.task_workspace, self.harness)
+        task_root = self.harness.task_workspace({"id": task_id, "workspace_path": "tasks/" + task_id}, create=True)
+        other_root = self.harness.task_workspace({"id": other_id, "workspace_path": "tasks/" + other_id}, create=True)
+        (task_root / "same.txt").write_bytes(b"this task only")
+        (other_root / "same.txt").write_bytes(b"other task must stay private")
+        result = f"[result](same.txt) [other](<{other_root / 'same.txt'}>)"
+        with self.harness.store.lock, self.harness.store.db:
+            self.harness.store.db.execute("UPDATE tasks SET id=?,workspace_path=?,result=? WHERE id=?",
+                                          (task_id, "tasks/" + task_id, result, old_id))
+            self.harness.store.db.execute("UPDATE mail_commands SET task_id=? WHERE task_id=?", (task_id, old_id))
+        self._deliver()
+        self.assertEqual(self._attachments(FakeSMTP.instances[0].sent[0]), [("same.txt", b"this task only")])
 
     def test_plain_and_signed_replies_attach_binary_and_image_and_signed_parts_verify(self):
         binary = self.workspace / "data.bin"

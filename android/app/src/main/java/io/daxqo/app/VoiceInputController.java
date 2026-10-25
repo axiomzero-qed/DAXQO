@@ -2,250 +2,327 @@ package io.daxqo.app;
 
 import android.Manifest;
 import android.content.Context;
-import android.content.ComponentName;
-import android.content.Intent;
-import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
-import android.content.pm.ServiceInfo;
-import android.os.Build;
-import android.os.Bundle;
+import android.media.AudioFormat;
+import android.media.AudioRecord;
+import android.media.MediaRecorder;
 import android.os.Handler;
 import android.os.Looper;
-import android.speech.RecognitionListener;
-import android.speech.RecognizerIntent;
-import android.speech.RecognitionService;
-import android.speech.SpeechRecognizer;
-import android.provider.Settings;
+import android.util.Log;
 
-import java.util.ArrayList;
-import java.util.List;
+import com.k2fsa.sherpa.onnx.FeatureConfig;
+import com.k2fsa.sherpa.onnx.OnlineModelConfig;
+import com.k2fsa.sherpa.onnx.OnlineRecognizer;
+import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig;
+import com.k2fsa.sherpa.onnx.OnlineRecognizerResult;
+import com.k2fsa.sherpa.onnx.OnlineStream;
+import com.k2fsa.sherpa.onnx.OnlineZipformer2CtcModelConfig;
 
-/** One-shot speech-to-text helper. All public methods must be called on the main thread. */
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/** Local-only streaming Chinese ASR. Public methods must be called on the main thread. */
 public final class VoiceInputController {
-    private static final String RECOGNITION_SETTING = "voice_recognition_service";
-    private static final long MAX_SESSION_MS = 45_000L;
-    public enum Availability { ON_DEVICE, SYSTEM_SERVICE, NO_SERVICE }
-
-    public interface Callback {
-        /** Status suitable for a small UI hint, such as listening or processing. */
-        void onStatus(String message);
-        /** Called once for a successful final transcript. Never submits it. */
-        void onFinalText(String text);
-        /** Called when startup or recognition fails. */
-        void onError(String message);
-    }
-
+    private static final int SAMPLE_RATE = 16000;
+    private static final int CHANNEL = AudioFormat.CHANNEL_IN_MONO;
+    private static final int PCM = AudioFormat.ENCODING_PCM_16BIT;
+    private static final long MAX_SESSION_MS = 60_000L;
+    private static final String TAG = "DAXQO-Voice";
     private final Context appContext;
     private final Callback callback;
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private Runnable timeout;
-    private SpeechRecognizer recognizer;
-    private boolean active;
-    private boolean destroyed;
-    private long session;
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "daxqo-local-asr");
+        t.setDaemon(true);
+        return t;
+    });
+    private final Object admissionLock = new Object();
+    private volatile Session active;
+    private volatile long generation;
+    private volatile boolean destroyed;
+
+    public interface Callback {
+        void onStatus(String message);
+        /** Full cumulative hypothesis; later partials may revise it. */
+        void onPartialText(String fullHypothesis);
+        void onFinalText(String text);
+        void onError(String message);
+        /** Used when release happens before recording has started (for example during model load). */
+        void onCancelled();
+    }
+
+    private static final class Session {
+        final long generation;
+        volatile boolean stopRequested;
+        volatile boolean cancelled;
+        volatile boolean timedOut;
+        volatile AudioRecord recorder;
+        final VoiceTranscriptAccumulator transcript = new VoiceTranscriptAccumulator();
+        Runnable timeout;
+        boolean capturedAudio;
+        String lastPartial;
+        Session(long generation) { this.generation = generation; }
+    }
 
     public VoiceInputController(Context context, Callback callback) {
         this.appContext = context.getApplicationContext();
         this.callback = callback;
     }
 
-    /** Reports which route start() will use; callers can disclose system recognition first. */
-    public static Availability getAvailability(Context context) {
-        try {
-            if (Build.VERSION.SDK_INT >= 31
-                    && SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
-                return Availability.ON_DEVICE;
-            }
-            return recognitionService(context) != null ? Availability.SYSTEM_SERVICE : Availability.NO_SERVICE;
-        } catch (RuntimeException e) {
-            return Availability.NO_SERVICE;
-        }
+    /** This implementation is bundled-model-only; availability does not depend on system ASR. */
+    public static boolean isAvailable(Context context) {
+        return context != null && context.getPackageManager().hasSystemFeature(
+                PackageManager.FEATURE_MICROPHONE);
     }
 
-    public static boolean requiresSystemRecognition(Context context) {
-        return getAvailability(context) == Availability.SYSTEM_SERVICE;
-    }
+    public boolean isListening() { return active != null; }
 
-    /** Some OEMs ship a recognizer but leave VOICE_RECOGNITION_SERVICE unset. */
-    private static ServiceInfo recognitionService(Context context) {
-        List<ResolveInfo> choices = context.getPackageManager().queryIntentServices(
-                new Intent(RecognitionService.SERVICE_INTERFACE), 0);
-        String selected = Settings.Secure.getString(context.getContentResolver(),
-                RECOGNITION_SETTING);
-        ServiceInfo best = null;
-        for (ResolveInfo choice : choices) {
-            ServiceInfo service = choice.serviceInfo;
-            if (service == null || !service.enabled || !service.exported
-                    || service.applicationInfo == null || !service.applicationInfo.enabled) continue;
-            // Legacy OEM services may have no bind permission. Modern services
-            // use the system broker's BIND_VOICE_INTERACTION permission.
-            if (service.permission != null && !service.permission.isEmpty()
-                    && !Manifest.permission.BIND_VOICE_INTERACTION.equals(service.permission)) continue;
-            String component = new ComponentName(service.packageName, service.name).flattenToString();
-            if (component.equals(selected) || new ComponentName(service.packageName, service.name).flattenToShortString().equals(selected)) return service;
-            boolean system = (service.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
-            boolean bestSystem = best != null && (best.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
-            if (best == null || (system && !bestSystem)
-                    || (system == bestSystem && component.compareTo(new ComponentName(best.packageName, best.name).flattenToString()) < 0)) best = service;
-        }
-        return best;
-    }
-
-    public static String systemServiceLabel(Context context) {
-        try {
-            ServiceInfo service = recognitionService(context);
-            return service == null ? "系统服务" : service.loadLabel(context.getPackageManager()).toString();
-        } catch (RuntimeException ignored) { return "系统服务"; }
-    }
-
-    public boolean isListening() { return active; }
-
-    /** Starts one recognition session. Runtime RECORD_AUDIO permission is owned by the caller. */
     public void start() {
-        if (destroyed) {
-            callback.onError("语音输入已关闭");
-            return;
-        }
-        if (active) return; // Ignore rapid repeat taps.
+        if (destroyed || active != null) return;
         if (appContext.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
-            callback.onError("请先授予麦克风权限");
+            callback.onError("请先授予达氙麦克风权限");
             return;
         }
-
-        Availability availability = getAvailability(appContext);
-        if (availability == Availability.NO_SERVICE) {
-            callback.onError("此设备没有可用的语音识别服务");
-            return;
-        }
-        active = true;
-        final long currentSession = ++session;
-        try {
-            if (Build.VERSION.SDK_INT >= 31 && availability == Availability.ON_DEVICE) {
-                recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(appContext);
-            } else {
-                ServiceInfo service = recognitionService(appContext);
-                if (service == null) { finishError(currentSession, "此设备没有可用的语音识别服务"); return; }
-                recognizer = SpeechRecognizer.createSpeechRecognizer(appContext,
-                        new ComponentName(service.packageName, service.name));
+        Session session = new Session(++generation);
+        active = session;
+        callback.onStatus("正在加载本机语音模型");
+        session.timeout = () -> {
+            if (active == session && !session.stopRequested && !session.cancelled) {
+                session.timedOut = true;
+                requestStop(session);
+                callback.onStatus("已到单次时长上限，正在整理文字");
             }
-            recognizer.setRecognitionListener(new Listener(currentSession));
-            Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                    RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN");
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "zh-CN");
-            intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
-            callback.onStatus("正在聆听…");
-            timeout = () -> finishError(currentSession, "语音输入超时，请重试");
-            mainHandler.postDelayed(timeout, MAX_SESSION_MS);
-            recognizer.startListening(intent);
-        } catch (SecurityException e) {
-            finishError(currentSession, "无法访问麦克风，请检查权限");
-        } catch (RuntimeException e) {
-            finishError(currentSession, "无法启动语音识别");
-        }
+        };
+        main.postDelayed(session.timeout, MAX_SESSION_MS);
+        worker.execute(() -> recognize(session));
     }
 
-    /** Requests end of speech and final recognition. */
+    /** Stops capture promptly and lets the worker flush the final hypothesis. */
     public void stop() {
-        if (!active || recognizer == null) return;
-        callback.onStatus("正在识别…");
-        try { recognizer.stopListening(); }
-        catch (RuntimeException e) { finishError(session, "语音识别未能完成"); }
-    }
-
-    /** Cancels silently and invalidates any callbacks already queued by the service. */
-    public void cancel() {
-        if (!active) return;
-        active = false;
-        ++session;
-        clearTimeout();
-        if (recognizer != null) {
-            try { recognizer.cancel(); } catch (RuntimeException ignored) { }
-            try { recognizer.destroy(); } catch (RuntimeException ignored) { }
-            recognizer = null;
+        Session session = active;
+        if (session == null || session.stopRequested || session.cancelled) return;
+        boolean wasCapturing = requestStop(session);
+        if (!wasCapturing) {
+            session.cancelled = true;
+            finishCancelled(session);
+        } else {
+            callback.onStatus("正在整理文字");
         }
     }
 
-    /** Releases resources; safe to call more than once. */
+    /** Invalidates queued callbacks and stops capture without returning text. */
+    public void cancel() {
+        Session session;
+        synchronized (admissionLock) {
+            session = active;
+            if (session == null) return;
+            ++generation;
+            active = null;
+            session.cancelled = true;
+            session.stopRequested = true;
+            stopRecorderLocked(session);
+        }
+        clearTimeout(session);
+    }
+
     public void destroy() {
         if (destroyed) return;
         cancel();
         destroyed = true;
+        worker.shutdownNow();
     }
 
-    private void finishError(long expected, String message) {
-        if (!isCurrent(expected)) return;
-        releaseSession();
-        callback.onError(message);
-    }
-
-    private boolean isCurrent(long expected) {
-        return !destroyed && active && session == expected;
-    }
-
-    private void releaseSession() {
-        active = false;
-        clearTimeout();
-        if (recognizer != null) {
-            try { recognizer.destroy(); } catch (RuntimeException ignored) { }
-            recognizer = null;
-        }
-    }
-
-    private void clearTimeout() {
-        if (timeout != null) {
-            mainHandler.removeCallbacks(timeout);
-            timeout = null;
-        }
-    }
-
-    private final class Listener implements RecognitionListener {
-        private final long expected;
-        Listener(long expected) { this.expected = expected; }
-        @Override public void onReadyForSpeech(Bundle params) {
-            if (isCurrent(expected)) callback.onStatus("请开始说话");
-        }
-        @Override public void onBeginningOfSpeech() {
-            if (isCurrent(expected)) callback.onStatus("正在聆听…");
-        }
-        @Override public void onRmsChanged(float rmsdB) { }
-        @Override public void onBufferReceived(byte[] buffer) { }
-        @Override public void onEndOfSpeech() {
-            if (isCurrent(expected)) callback.onStatus("正在识别…");
-        }
-        @Override public void onError(int error) {
-            if (!isCurrent(expected)) return;
-            if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                finishError(expected, "没有识别到语音，请重试");
-            } else if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
-                boolean appHasMicPermission = appContext.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
-                        == PackageManager.PERMISSION_GRANTED;
-                finishError(expected, appHasMicPermission
-                        ? "系统语音识别服务报告权限不足；达氙已获麦克风权限，请检查系统麦克风开关或更换识别服务。"
-                        : "请先授予达氙麦克风权限后重试");
-            } else if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED
-                    || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE) {
-                finishError(expected, "中文语音资源暂不可用，请检查系统语音识别设置");
-            } else {
-                finishError(expected, "语音识别失败，请重试");
+    private void recognize(Session s) {
+        OnlineRecognizer recognizer = null;
+        OnlineStream stream = null;
+        AudioRecord record = null;
+        try {
+            if (!isCurrent(s) || s.stopRequested) { finishCancelled(s); return; }
+            recognizer = createRecognizer();
+            if (!isCurrent(s) || s.stopRequested) { finishCancelled(s); return; }
+            stream = recognizer.createStream("");
+            int minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL, PCM);
+            if (minBuffer <= 0) throw new IllegalStateException("当前设备不支持本机录音");
+            int bufferBytes = Math.max(minBuffer * 2, 4096);
+            record = new AudioRecord(MediaRecorder.AudioSource.MIC, SAMPLE_RATE, CHANNEL, PCM, bufferBytes);
+            if (record.getState() != AudioRecord.STATE_INITIALIZED) {
+                throw new IllegalStateException("无法初始化麦克风");
             }
-        }
-        @Override public void onResults(Bundle results) {
-            if (!isCurrent(expected)) return;
-            ArrayList<String> matches = results == null ? null
-                    : results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-            releaseSession();
-            String transcript = matches == null || matches.isEmpty() ? null : matches.get(0);
-            if (transcript == null || transcript.trim().isEmpty()) {
-                callback.onError("没有识别到语音，请重试");
-            } else {
-                callback.onFinalText(transcript.trim());
+            s.recorder = record;
+            if (!isCurrent(s) || s.stopRequested) { finishCancelled(s); return; }
+            if (!startRecordingIfAdmitted(s, record)) {
+                finishCancelled(s);
+                return;
             }
+            if (record.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+                throw new IllegalStateException("无法开始麦克风录音");
+            }
+            postStatus(s, "正在聆听");
+            short[] pcm = new short[1024];
+            while (isCurrent(s) && !s.cancelled && !s.stopRequested) {
+                int count = record.read(pcm, 0, pcm.length, AudioRecord.READ_BLOCKING);
+                if (count < 0) {
+                    if (s.stopRequested || s.cancelled) break;
+                    throw new IllegalStateException("读取麦克风失败");
+                }
+                if (count == 0) continue;
+                s.capturedAudio = true;
+                float[] samples = new float[count];
+                for (int i = 0; i < count; i++) samples[i] = pcm[i] / 32768.0f;
+                stream.acceptWaveform(samples, SAMPLE_RATE);
+                decodeReady(recognizer, stream);
+                String current = resultText(recognizer, stream);
+                if (recognizer.isEndpoint(stream)) {
+                    String full = s.transcript.commitEndpoint(current);
+                    if (!full.isEmpty()) postPartial(s, full);
+                    recognizer.reset(stream);
+                } else if (!current.isEmpty()) {
+                    postPartial(s, s.transcript.hypothesis(current));
+                }
+            }
+            if (s.cancelled || !isCurrent(s)) { finishCancelled(s); return; }
+            stopAndReleaseRecorder(s, record);
+            record = null;
+            stream.inputFinished();
+            decodeReady(recognizer, stream);
+            String finalText = s.transcript.finish(resultText(recognizer, stream));
+            if (s.timedOut) postStatus(s, "正在整理文字");
+            if (!s.capturedAudio || finalText.isEmpty()) {
+                finishError(s, s.capturedAudio ? "没有识别到语音，请重试" : "没有收到语音，请按住说话后再松开");
+            } else {
+                finishText(s, finalText);
+            }
+        } catch (SecurityException e) {
+            logFailure(e);
+            finishError(s, "无法访问麦克风，请检查达氙的麦克风权限");
+        } catch (LinkageError e) {
+            logFailure(e);
+            finishError(s, "本机语音组件与设备不兼容");
+        } catch (Exception e) {
+            logFailure(e);
+            finishError(s, "本机语音模型不可用或识别失败，请检查模型文件后重试");
+        } finally {
+            s.recorder = null;
+            if (record != null) stopAndReleaseRecorder(s, record);
+            if (stream != null) try { stream.release(); } catch (RuntimeException ignored) { }
+            if (recognizer != null) try { recognizer.release(); } catch (RuntimeException ignored) { }
         }
-        @Override public void onPartialResults(Bundle partialResults) { }
-        @Override public void onEvent(int eventType, Bundle params) { }
+    }
+
+    private OnlineRecognizer createRecognizer() {
+        FeatureConfig feature = new FeatureConfig(SAMPLE_RATE, 80, 0.0f);
+        OnlineModelConfig model = new OnlineModelConfig();
+        model.setZipformer2Ctc(new OnlineZipformer2CtcModelConfig("voice/model.int8.onnx"));
+        model.setTokens("voice/tokens.txt");
+        model.setNumThreads(2);
+        model.setProvider("cpu");
+        model.setModelingUnit("cjkchar");
+        OnlineRecognizerConfig config = new OnlineRecognizerConfig();
+        config.setFeatConfig(feature);
+        config.setModelConfig(model);
+        return new OnlineRecognizer(appContext.getAssets(), config);
+    }
+
+    private static void decodeReady(OnlineRecognizer recognizer, OnlineStream stream) {
+        while (recognizer.isReady(stream)) recognizer.decode(stream);
+    }
+
+    private static String resultText(OnlineRecognizer recognizer, OnlineStream stream) {
+        OnlineRecognizerResult result = recognizer.getResult(stream);
+        return result == null || result.getText() == null ? "" : result.getText();
+    }
+
+    /** Linearizes admission with release/cancel; lock is never held during read or decode. */
+    private boolean startRecordingIfAdmitted(Session s, AudioRecord r) {
+        synchronized (admissionLock) {
+            if (!isCurrent(s) || s.stopRequested || s.cancelled) return false;
+            r.startRecording();
+            return r.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING;
+        }
+    }
+
+    private boolean requestStop(Session s) {
+        synchronized (admissionLock) {
+            if (active != s || s.cancelled) return false;
+            AudioRecord r = s.recorder;
+            boolean wasCapturing = false;
+            if (r != null) {
+                try { wasCapturing = r.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING; }
+                catch (RuntimeException ignored) { }
+            }
+            s.stopRequested = true;
+            stopRecorderLocked(s);
+            return wasCapturing;
+        }
+    }
+
+    private static void stopRecorderLocked(Session s) {
+        AudioRecord r = s.recorder;
+        if (r != null) {
+            try {
+                if (r.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) r.stop();
+            } catch (RuntimeException ignored) { }
+        }
+    }
+
+    private static void logFailure(Throwable error) {
+        Log.w(TAG, "local ASR failure: " + error.getClass().getSimpleName());
+    }
+
+    private static void stopAndReleaseRecorder(Session s, AudioRecord r) {
+        try {
+            if (r.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) r.stop();
+        } catch (RuntimeException ignored) { }
+        try { r.release(); } catch (RuntimeException ignored) { }
+        if (s.recorder == r) s.recorder = null;
+    }
+
+    private boolean isCurrent(Session s) {
+        return !destroyed && active == s && generation == s.generation;
+    }
+
+    private void postStatus(Session s, String message) {
+        main.post(() -> { if (isCurrent(s)) callback.onStatus(message); });
+    }
+
+    private void postPartial(Session s, String text) {
+        if (text.equals(s.lastPartial)) return;
+        s.lastPartial = text;
+        main.post(() -> { if (isCurrent(s)) callback.onPartialText(text); });
+    }
+
+    private void finishText(Session s, String text) {
+        main.post(() -> {
+            if (!isCurrent(s)) return;
+            clearTimeout(s);
+            active = null;
+            callback.onFinalText(text);
+        });
+    }
+
+    private void finishError(Session s, String message) {
+        main.post(() -> {
+            if (!isCurrent(s)) return;
+            clearTimeout(s);
+            active = null;
+            callback.onError(message);
+        });
+    }
+
+    private void finishCancelled(Session s) {
+        main.post(() -> {
+            if (!isCurrent(s)) return;
+            clearTimeout(s);
+            active = null;
+            callback.onCancelled();
+        });
+    }
+
+    private void clearTimeout(Session s) {
+        if (s.timeout != null) {
+            main.removeCallbacks(s.timeout);
+            s.timeout = null;
+        }
     }
 }

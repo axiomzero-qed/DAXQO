@@ -1038,7 +1038,7 @@ class MailControlService:
             owned = self.store.db.execute("SELECT 1 FROM mail_commands WHERE contact_id=? AND action='submit' AND task_id=?", (contact["id"], task_id)).fetchone()
         task = self.store.row(task_id) if owned else None
         if not task: return [[]], notes
-        files = collector(task.get("result") or "", expand_dirs=True)
+        files = collector(task.get("result") or "", expand_dirs=True, task_id=task_id)
         for item in files:
             if item.get("isDirectory"): continue
             size = item.get("size", -1)
@@ -1072,8 +1072,16 @@ class MailControlService:
             attachments, part_notes, used_names = [], list(notes), set()
             for item in group:
                 try:
+                    task = self.store.row(report.get("taskId"))
+                    scoped_root = self.harness.task_workspace(task) if task and task.get("workspace_path") else None
+                    if scoped_root is not None:
+                        candidate, _ = self.harness.resolve_workspace_path(item["path"])
+                        if scoped_root not in candidate.parents:
+                            raise ValueError("Artifact left its task workspace")
                     relative, raw = self.harness.read_workspace_download(item["path"])
                     current, _ = self.harness.resolve_workspace_path(relative)
+                    if scoped_root is not None and scoped_root not in current.parents:
+                        raise ValueError("Artifact left its task workspace")
                     if len(raw) != item["size"] or current.stat().st_mtime_ns != item.get("modifiedAt"):
                         raise ValueError("Artifact changed since result discovery")
                     name = "".join(ch for ch in item["name"] if ch >= " " and ch not in '/\\')[:180] or "result"
