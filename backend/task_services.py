@@ -6,7 +6,7 @@ import hashlib
 import json
 import mimetypes
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import stat
 import threading
@@ -156,7 +156,191 @@ class TaskServices:
                                "mime": mime, "isImage": mime.startswith("image/"),
                                "visionSupported": False}}
 
-    def prepare_body(self, body):
+    def _task_workspace(self, task_workspace: Path) -> tuple[Path, str]:
+        root = self.harness.workspace.resolve(strict=True)
+        supplied = Path(task_workspace)
+        if ".." in supplied.parts:
+            raise ValueError("任务工作区路径无效")
+        candidate = Path(os.path.abspath(supplied if supplied.is_absolute() else root / supplied))
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            raise ValueError("任务工作区必须位于本机工作区内") from None
+        if not relative.parts or any(part in (".", "..") for part in relative.parts):
+            raise ValueError("任务工作区路径无效")
+        current = root
+        for part in relative.parts:
+            current = current / part
+            try:
+                info = current.lstat()
+            except OSError as exc:
+                raise ValueError("任务工作区不可用") from exc
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise ValueError("任务工作区不能包含链接或非目录")
+        if current.resolve(strict=True) != current:
+            raise ValueError("任务工作区不能包含链接")
+        return current, relative.as_posix()
+
+    @staticmethod
+    def _hash_regular_file(path: Path, expected_size: int, expected_sha256: str) -> None:
+        try:
+            before = path.lstat()
+            if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+                raise ValueError("附件必须是普通文件")
+            if before.st_size != expected_size or not 0 <= expected_size <= MAX_UPLOAD:
+                raise ValueError("附件大小与上传记录不符")
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) |
+                         getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        except OSError as exc:
+            raise ValueError("附件不可用") from exc
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with os.fdopen(fd, "rb") as source:
+                opened = os.fstat(source.fileno())
+                if (not stat.S_ISREG(opened.st_mode)
+                        or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)):
+                    raise ValueError("附件在读取前已更改")
+                for chunk in iter(lambda: source.read(64 * 1024), b""):
+                    size += len(chunk)
+                    if size > expected_size:
+                        raise ValueError("附件大小与上传记录不符")
+                    digest.update(chunk)
+                after = path.lstat()
+                final = os.fstat(source.fileno())
+                if (size != expected_size or digest.hexdigest() != expected_sha256
+                        or stat.S_ISLNK(after.st_mode) or not stat.S_ISREG(after.st_mode)
+                        or (final.st_dev, final.st_ino) != (before.st_dev, before.st_ino)
+                        or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+                        or final.st_size != expected_size or after.st_size != expected_size):
+                    raise ValueError("附件内容与上传记录不符")
+        except OSError as exc:
+            raise ValueError("附件读取失败") from exc
+
+    def _copy_upload_to_task(self, row, task_workspace: Path, task_workspace_rel: str) -> tuple[Path, str]:
+        ident = row["id"]
+        name = self._filename(row["name"])
+        try:
+            parsed_id = uuid.UUID(ident)
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError("附件标识无效") from None
+        if str(parsed_id) != ident:
+            raise ValueError("附件标识无效")
+        stored_relative = row["path"]
+        expected_relative = f"imports/{ident}_{name}"
+        if (not isinstance(stored_relative, str) or "\\" in stored_relative
+                or PurePosixPath(stored_relative).is_absolute() or stored_relative != expected_relative):
+            raise ValueError("附件路径无效")
+
+        root = self.harness.workspace.resolve(strict=True)
+        source_path = root / "imports" / f"{ident}_{name}"
+        imports_dir = root / "imports"
+        try:
+            dir_info = imports_dir.lstat()
+        except OSError as exc:
+            raise ValueError("上传附件目录不可用") from exc
+        if stat.S_ISLNK(dir_info.st_mode) or not stat.S_ISDIR(dir_info.st_mode) or imports_dir.resolve(strict=True) != imports_dir:
+            raise ValueError("上传附件目录不能是链接")
+
+        size, digest = row["size"], row["sha256"]
+        if type(size) is not int or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("附件上传记录无效")
+        # Verify the immutable upload before either reusing or creating a task copy.
+        self._hash_regular_file(source_path, size, digest)
+
+        input_dir = task_workspace / "inputs"
+        try:
+            if input_dir.exists() or input_dir.is_symlink():
+                info = input_dir.lstat()
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                    raise ValueError("任务附件目录不能是链接或文件")
+            else:
+                input_dir.mkdir(mode=0o700)
+            if input_dir.resolve(strict=True) != input_dir or task_workspace not in input_dir.resolve(strict=True).parents:
+                raise ValueError("任务附件目录路径无效")
+        except OSError as exc:
+            raise ValueError("任务附件目录不可用") from exc
+
+        filename = f"{ident}_{name}"
+        target = input_dir / filename
+        relative = f"{task_workspace_rel}/inputs/{filename}"
+        try:
+            existing = target.lstat()
+        except FileNotFoundError:
+            existing = None
+        except OSError as exc:
+            raise ValueError("任务附件副本不可用") from exc
+        if existing is not None:
+            if stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode):
+                raise ValueError("任务附件副本必须是普通文件")
+            try:
+                self._hash_regular_file(target, size, digest)
+            except ValueError:
+                raise ValueError("任务附件副本已被修改，拒绝覆盖") from None
+            return target, relative
+
+        temporary = input_dir / f".{ident}.{uuid.uuid4().hex}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(temporary, flags, 0o600)
+        except OSError as exc:
+            raise ValueError("无法创建任务附件临时副本") from exc
+
+        copied_hash = hashlib.sha256()
+        copied_size = 0
+        try:
+            source_fd = os.open(source_path, os.O_RDONLY | getattr(os, "O_BINARY", 0) |
+                                getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        except OSError as exc:
+            os.close(fd)
+            temporary.unlink(missing_ok=True)
+            raise ValueError("附件读取失败") from exc
+        try:
+            with os.fdopen(source_fd, "rb") as source, os.fdopen(fd, "wb") as output:
+                source_info = os.fstat(source.fileno())
+                target_info = os.fstat(output.fileno())
+                if (not stat.S_ISREG(source_info.st_mode) or not stat.S_ISREG(target_info.st_mode)
+                        or target_info.st_size != 0):
+                    raise ValueError("附件副本文件类型无效")
+                while True:
+                    chunk = source.read(64 * 1024)
+                    if not chunk:
+                        break
+                    copied_size += len(chunk)
+                    if copied_size > size:
+                        raise ValueError("附件大小与上传记录不符")
+                    copied_hash.update(chunk)
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+                source_after = os.fstat(source.fileno())
+                source_path_after = source_path.lstat()
+                if (copied_size != size or copied_hash.hexdigest() != digest
+                        or (source_after.st_dev, source_after.st_ino) != (source_info.st_dev, source_info.st_ino)
+                        or (source_path_after.st_dev, source_path_after.st_ino) != (source_info.st_dev, source_info.st_ino)
+                        or source_after.st_size != size or source_path_after.st_size != size):
+                    raise ValueError("附件内容与上传记录不符")
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        try:
+            self._hash_regular_file(temporary, size, digest)
+            # Hard-link publication is atomic and cannot replace a file that
+            # appeared during a concurrent retry.
+            os.link(temporary, target, follow_symlinks=False)
+        except FileExistsError:
+            try:
+                self._hash_regular_file(target, size, digest)
+            except ValueError:
+                raise ValueError("任务附件副本已被修改，拒绝覆盖") from None
+        except (OSError, ValueError) as exc:
+            raise ValueError("无法安全发布任务附件副本") from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+        self._hash_regular_file(target, size, digest)
+        return target, relative
+
+    def prepare_body(self, body, *, task_workspace: Path | None = None):
         if not isinstance(body, dict): raise ValueError("JSON object required")
         attachments = body.get("attachments", [])
         if not isinstance(attachments, list) or len(attachments) > 6:
@@ -164,22 +348,26 @@ class TaskServices:
         if any(not isinstance(ident, str) for ident in attachments):
             raise ValueError("Invalid attachment identifier")
         if not attachments: return body
+        task_root, task_root_rel = self._task_workspace(task_workspace) if task_workspace is not None else (None, None)
         lines, public_attachments = [], []
         for ident in dict.fromkeys(attachments):
             if not isinstance(ident, str): raise ValueError("Invalid attachment identifier")
             with self.store.lock:
                 row = self.store.db.execute("SELECT * FROM uploads WHERE id=?", (ident,)).fetchone()
             if not row: raise ValueError("附件不存在，请重新导入")
-            path, _ = self.harness.resolve_workspace_path(row["path"])
-            if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode) or path.stat().st_size > MAX_UPLOAD:
-                raise ValueError("附件不可用")
+            if task_root is not None:
+                path, relative_path = self._copy_upload_to_task(row, task_root, task_root_rel)
+            else:
+                path, relative_path = self.harness.resolve_workspace_path(row["path"])
+                if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode) or path.stat().st_size > MAX_UPLOAD:
+                    raise ValueError("附件不可用")
             lines.append(f"- {json.dumps(row['name'], ensure_ascii=False)}: {json.dumps(str(path), ensure_ascii=False)} ({row['mime']}, {row['size']} bytes)")
-            public_attachments.append({"id": ident, "name": row["name"], "path": row["path"],
+            public_attachments.append({"id": ident, "name": row["name"], "path": relative_path,
                 "size": row["size"], "mime": row["mime"], "isImage": row["mime"].startswith("image/"),
                 "visionSupported": False})
         result = dict(body)
         field = "text" if "text" in body else "prompt"
-        text = result.get(field, "")
+        text = result.get("_displayText", result.get(field, ""))
         if not isinstance(text, str): raise ValueError("Message text must be a string")
         result["_displayText"] = text
         result["_attachments"] = public_attachments

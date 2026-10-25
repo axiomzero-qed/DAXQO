@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-APP_VERSION = "0.6.1"
+APP_VERSION = "0.6.2"
 DEFAULT_PORT = 18882
 DEFAULT_BACKEND_PORT = 18880
 MAX_REQUEST = 1024 * 1024

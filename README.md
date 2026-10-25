@@ -5,11 +5,11 @@
 [中文](#中文) | [English](#english)
 
 
-## V0.6 语音草稿与成果交付 / V0.6 voice drafts and artifact delivery
+## V0.6.2 本地语音与独立任务工作区 / V0.6.2 local voice and task workspaces
 
-V0.6 增加本机优先的语音转写草稿、GUI 工作区成果卡片和授权栅格图片预览，并收紧远程邮件附件范围与大小限制。0.6.1 补丁提高 Android versionCode，以兼容从现有 code 10 安装版本升级；尚未完成真机验收。网页语音入口需配套新版原生 APK；本机麦克风识别尚未真机验收。历史任务规划与助手转交见 [V0.5 说明](docs/V0.5.md)，本版行为说明见 [V0.6 指南](docs/V0.6.md)。
+V0.6.2 核心版使用随 APK 提供约 25 MB 权重的本地流式中文语音识别；按住说话、松开定稿，临时全文可继续修订，转写只回填草稿，不自动发送。首次构建时会按脚本下载固定版本的 AAR（约 49 MB）和模型归档（约 21 MB），并缓存到 `DAXQO_VOICE_CACHE`。识别在设备本地运行，无需 ASR 账号或识别网络；小模型的识别质量会变化，界面支持用户修改，不保证语义纠错。只有用户发送草稿后，文本才交给已配置的 DeepSeek 理解任务。新对话各用独立工作区，同一对话继续沿用原目录；任务详情可打开本任务文件。安卓录音按钮放大并固定位置，隐藏桌面 Enter 提示。V0.6 还提供 GUI 工作区成果卡片、授权栅格图片预览和受限邮件附件。Neo 与 Redmi K70 已通过真实麦克风流式识别、松手定稿及取消检查，详见版本指南。历史任务规划与助手转交见 [V0.5 说明](docs/V0.5.md)，0.6.2 行为说明见 [V0.6.2 指南](docs/V0.6.2.md)，0.6.1 历史验收记录保留在 [V0.6 指南](docs/V0.6.md)。
 
-V0.6 adds local-first speech transcription into editable drafts, GUI workspace artifact cards and authorized raster-image previews, and tighter scope and size limits for remote email attachments. The 0.6.1 patch raises Android versionCode for upgrades from existing code 10 installs; this has not yet been verified on a physical device. The voice button requires the matching newer native APK; microphone recognition has not been verified on a physical device. See the historical [V0.5 guide](docs/V0.5.md) and the [V0.6 guide](docs/V0.6.md).
+V0.6.2 Core includes streaming Chinese speech recognition with approximately 25 MB of model weights packaged in the APK. Hold to speak and release to finalize; interim full text remains editable, transcription only fills the draft, and nothing is sent automatically. The first build downloads script-pinned AAR (about 49 MB) and model archive (about 21 MB) resources and caches them in `DAXQO_VOICE_CACHE`. Recognition runs locally without an ASR account or recognition network. Recognition quality varies with the small model; the UI allows edits but does not guarantee semantic correction. DeepSeek receives text only after the user sends the draft. New conversations use separate workspaces and follow-ups reuse the original directory; task details open the corresponding files. Android has a larger, stable microphone button and hides the desktop Enter hint. V0.6 also provides GUI workspace artifact cards, authorized raster-image previews, and scoped email attachments. Real-microphone streaming, release-to-finalize and cancellation checks passed on Neo and Redmi K70; see the version guide. See the historical [V0.5 guide](docs/V0.5.md), the [V0.6.2 guide](docs/V0.6.2.md), and the preserved [V0.6.1 acceptance record](docs/V0.6.md).
 
 ## 中文
 
@@ -17,7 +17,7 @@ DAXQO 是单仓库双平台配置：Standard 为基准版本（基准提交 `837
 
 DAXQO 是面向手机的 Agent 工作台：Android 提供持续对话与成果界面，工具在手机已有的 Linux 环境执行，模型通过用户配置的 API 接入。项目采用 [MIT 许可证](LICENSE)；仓库地址为 [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO)。第三方依赖见[第三方说明](THIRD_PARTY_NOTICES.md)。
 
-当前源码为 V0.6（补丁版 0.6.1，Android versionCode 11），包含 V0.5 的任务规划与助手转交，以及语音草稿、GUI 成果交付和受限邮件附件；针对现有 code 10 安装版的升级兼容尚未真机验收。见 [V0.6 指南](docs/V0.6.md)、[V0.5 历史说明](docs/V0.5.md)、[V0.4 控制与邮件指南](docs/V0.4.md) 和 [V0.4 STEPX Neo 验收记录](docs/NEO-V04-ACCEPTANCE.md)。GitHub 上现有的 [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) 仍是 V0.3 APK，不包含 V0.6。构建当前源码请使用：
+当前源码为 V0.6.2 核心版（Android versionCode 14），包含 V0.5 的任务规划与助手转交，以及本地流式中文语音草稿、GUI 成果交付和受限邮件附件。XM 与 Standard 共享核心；独立仓库的 Android Collector（versionCode 15）和 Motor（versionCode 16）可作为原生扩展叠加。Neo 与 Redmi K70 的本地麦克风识别已验收；识别错字仍可在发送前手改。见 [V0.6.2 指南](docs/V0.6.2.md)、[V0.6.1 历史验收记录](docs/V0.6.md)、[V0.5 历史说明](docs/V0.5.md)、[V0.4 控制与邮件指南](docs/V0.4.md) 和 [V0.4 STEPX Neo 验收记录](docs/NEO-V04-ACCEPTANCE.md)。GitHub 上现有的 [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) 仍是 V0.3 APK，不包含 V0.6。构建当前源码请使用：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1
@@ -114,7 +114,7 @@ DAXQO is one repository with two platform configurations. Standard is the baseli
 
 DAXQO is a mobile Agent workspace. Its Android app provides persistent conversations and a results interface; tools run inside a Linux environment already available on the phone, and models are connected through an API configured by the user. The project uses the [MIT License](LICENSE); its repository is [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO). See [third-party notices](THIRD_PARTY_NOTICES.md) for external dependencies.
 
-The current source is V0.6 (patch 0.6.1, Android versionCode 11), including V0.5 task planning and assistant handoff alongside voice drafts, GUI artifact delivery, and scoped email attachments. Upgrade compatibility for existing code 10 installs has not yet been verified on a physical device. See the [V0.6 guide](docs/V0.6.md), [historical V0.5 guide](docs/V0.5.md), [V0.4 phone-control and email guide](docs/V0.4.md), and [V0.4 STEPX Neo acceptance record](docs/NEO-V04-ACCEPTANCE.md). The existing [V0.3 GitHub release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) remains a V0.3 APK and does not include V0.6. Build the current source with:
+The current source is V0.6.2 Core (Android versionCode 14), including V0.5 task planning and assistant handoff, local streaming Chinese speech drafts, GUI artifact delivery, and scoped email attachments. XM and Standard share the core. Android Collector (versionCode 15) and Motor (versionCode 16) from their independent repositories can be layered in as native extensions. Real-microphone streaming, release-to-finalize and cancellation checks passed on Neo and Redmi K70; see the version guide. See the [V0.6.2 guide](docs/V0.6.2.md), the preserved [V0.6.1 acceptance record](docs/V0.6.md), [historical V0.5 guide](docs/V0.5.md), [V0.4 phone-control and email guide](docs/V0.4.md), and [V0.4 STEPX Neo acceptance record](docs/NEO-V04-ACCEPTANCE.md). The existing [V0.3 GitHub release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) remains a V0.3 APK and does not include V0.6. Build the current source with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1

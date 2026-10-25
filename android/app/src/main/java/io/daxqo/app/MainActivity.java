@@ -63,7 +63,6 @@ public final class MainActivity extends Activity {
     private String activeVoiceSession;
     private long pendingVoicePage;
     private long pageGeneration;
-    private boolean shownSystemRecognitionNotice;
 
     @Override protected void onStart() { super.onStart(); visibleActivity = this; }
     @Override protected void onStop() {
@@ -110,8 +109,11 @@ public final class MainActivity extends Activity {
         consumePairIntent(getIntent());
         voiceInput = new VoiceInputController(this, new VoiceInputController.Callback() {
             @Override public void onStatus(String message) {
-                String type = "正在识别…".equals(message) ? "processing" : "listening";
-                emitVoiceEvent(type, null, null, activeVoiceSession);
+                String type = message.contains("整理") || message.contains("加载") ? "processing" : "listening";
+                emitVoiceEvent(type, null, message, activeVoiceSession);
+            }
+            @Override public void onPartialText(String text) {
+                emitVoiceEvent("partial", text, null, activeVoiceSession);
             }
             @Override public void onFinalText(String text) {
                 emitVoiceEvent("result", text, null, activeVoiceSession);
@@ -119,6 +121,10 @@ public final class MainActivity extends Activity {
             }
             @Override public void onError(String message) {
                 emitVoiceEvent("error", null, message, activeVoiceSession);
+                activeVoiceSession = null;
+            }
+            @Override public void onCancelled() {
+                emitVoiceEvent("cancelled", null, null, activeVoiceSession);
                 activeVoiceSession = null;
             }
         });
@@ -401,19 +407,11 @@ public final class MainActivity extends Activity {
             emitVoiceEvent("error", null, "当前页面暂不可使用语音输入", sessionId);
             return;
         }
-        if (voicePermissionPending || (voiceInput != null && voiceInput.isListening())) return;
-        VoiceInputController.Availability availability = VoiceInputController.getAvailability(this);
-        if (availability == VoiceInputController.Availability.NO_SERVICE) {
-            emitVoiceEvent("error", null, "此设备没有可用的语音识别服务", sessionId);
+        if (voicePermissionPending || activeVoiceSession != null
+                || (voiceInput != null && voiceInput.isListening())) return;
+        if (!VoiceInputController.isAvailable(this)) {
+            emitVoiceEvent("error", null, "此设备没有可用的麦克风", sessionId);
             return;
-        }
-        if (availability == VoiceInputController.Availability.SYSTEM_SERVICE) {
-            if (!shownSystemRecognitionNotice) {
-                Toast.makeText(this, "语音识别：" + VoiceInputController.systemServiceLabel(this) + "（可能联网）", Toast.LENGTH_LONG).show();
-                shownSystemRecognitionNotice = true;
-            }
-        } else {
-            Toast.makeText(this, "本机语音识别", Toast.LENGTH_SHORT).show();
         }
         if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             voicePermissionPending = true;
@@ -427,7 +425,11 @@ public final class MainActivity extends Activity {
     }
 
     private void stopVoice() {
-        if (voiceInput != null && voiceInput.isListening()) voiceInput.stop();
+        if (voicePermissionPending) {
+            cancelVoiceSession(true);
+        } else if (voiceInput != null && voiceInput.isListening()) {
+            voiceInput.stop();
+        }
     }
 
     private void cancelVoiceSession(boolean notify) {
@@ -475,8 +477,7 @@ public final class MainActivity extends Activity {
         if (sessionId == null) return;
         if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED
                 && samePage && mayUseVoice()) {
-            activeVoiceSession = sessionId;
-            voiceInput.start();
+            emitVoiceEvent("error", null, "麦克风权限已授予，请再次按住开始语音输入", sessionId);
         } else {
             emitVoiceEvent("error", null, "未授予麦克风权限，无法使用语音输入", sessionId);
         }

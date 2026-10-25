@@ -710,8 +710,16 @@ for line in sys.stdin:
         while time.time() < deadline and self.harness.store.row(task["id"])["status"] != "completed": time.sleep(0.01)
         original_thread = self.harness.store.row(task["id"])["thread_id"]
         _, message, delivery = self.harness.send_message(task["id"], {"text":"follow up", "clientMessageId":"follow-1"})
-        deadline = time.time() + 2
-        while time.time() < deadline and len(self.harness.store.messages(task["id"])) < 4: time.sleep(0.01)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            row = self.harness.store.row(task["id"])
+            history = self.harness.store.messages(task["id"])
+            if (row["status"] == "completed" and len(history) >= 4
+                    and history[2]["status"] == "started"):
+                break
+            if row["status"] not in ("queued", "running", "completed"):
+                break
+            time.sleep(0.01)
         row = self.harness.store.row(task["id"])
         self.assertEqual(row["status"], "completed")
         self.assertEqual(row["thread_id"], original_thread)
@@ -772,8 +780,14 @@ for line in sys.stdin:
     def test_engine_eof_interrupts_active_task_and_clears_active_id(self):
         self.insert_running_task("engine-eof")
         self.engine.process.kill()
-        deadline = time.time() + 2
-        while time.time() < deadline and self.harness.store.row("engine-eof")["status"] == "running":
+        # _engine_disconnected updates each durable row before clearing the
+        # active marker, all under the Harness lock. A DB-only poll can observe
+        # that intermediate state because it does not acquire that lock.
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            row = self.harness.store.row("engine-eof")
+            if row["status"] == "interrupted" and self.harness.active_task_id is None:
+                break
             time.sleep(0.01)
         self.assertEqual(self.harness.store.row("engine-eof")["status"], "interrupted")
         self.assertIsNone(self.harness.active_task_id)
@@ -796,7 +810,7 @@ for line in sys.stdin:
             with urllib.request.urlopen(req) as response:
                 result = json.loads(response.read())
                 self.assertTrue(result["engine"]["connected"])
-                self.assertEqual(result["app"], {"name":"DAXQO", "version":"0.6.1"})
+                self.assertEqual(result["app"], {"name":"DAXQO", "version":"0.6.2"})
         finally:
             http.shutdown(); http.server_close()
 

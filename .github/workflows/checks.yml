@@ -51,6 +51,11 @@ jobs:
         with:
           gradle-version: '8.10.2'
           cache-provider: basic
+      - name: Cache pinned offline voice runtime downloads
+        uses: actions/cache@v4
+        with:
+          path: .tools/voice-runtime
+          key: voice-runtime-${{ hashFiles('android/tools/prepare_voice_runtime.py') }}
       - name: Install Android SDK 35
         run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"'
       - name: Build and lint
