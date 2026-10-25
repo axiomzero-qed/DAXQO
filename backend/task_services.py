@@ -157,14 +157,20 @@ class TaskServices:
                                "visionSupported": False}}
 
     def _task_workspace(self, task_workspace: Path) -> tuple[Path, str]:
-        root = self.harness.workspace.resolve(strict=True)
+        configured_root = Path(os.path.abspath(self.harness.workspace))
+        root = configured_root.resolve(strict=True)
         supplied = Path(task_workspace)
         if ".." in supplied.parts:
             raise ValueError("任务工作区路径无效")
-        candidate = Path(os.path.abspath(supplied if supplied.is_absolute() else root / supplied))
-        try:
-            relative = candidate.relative_to(root)
-        except ValueError:
+        candidate = Path(os.path.abspath(supplied if supplied.is_absolute() else configured_root / supplied))
+        relative = None
+        for lexical_root in (configured_root, root):
+            try:
+                relative = candidate.relative_to(lexical_root)
+                break
+            except ValueError:
+                continue
+        if relative is None:
             raise ValueError("任务工作区必须位于本机工作区内") from None
         if not relative.parts or any(part in (".", "..") for part in relative.parts):
             raise ValueError("任务工作区路径无效")

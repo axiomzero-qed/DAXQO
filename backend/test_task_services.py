@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import ctypes
+import os
 import errno
 import json
 import io
@@ -232,6 +234,30 @@ class PrepareBodyFixtureTests(TaskServicesFixtureCase):
         self.assertEqual(target.read_bytes(), b"task-local attachment")
         self.assertEqual(source.read_bytes(), b"task-local attachment")
         self.assertEqual(len(list((task_workspace / "inputs").iterdir())), 1)
+
+    def test_task_workspace_accepts_windows_short_path_alias(self):
+        if os.name != "nt":
+            self.skipTest("Windows 8.3 path aliases are only available on Windows")
+        attachment = self.upload(b"short alias", name="alias.txt")
+        task_workspace, _ = self.make_task_workspace()
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetShortPathNameW(str(self.workspace), buffer, len(buffer))
+        if not length or length >= len(buffer):
+            self.skipTest("GetShortPathNameW could not resolve this workspace path")
+        short_root = Path(buffer.value)
+        if short_root == self.workspace:
+            self.skipTest("The workspace volume does not provide a distinct 8.3 alias")
+        short_task_workspace = short_root / task_workspace.relative_to(self.workspace)
+        configured_workspace = self.harness.workspace
+        self.harness.workspace = short_root
+        try:
+            prepared = self.services.prepare_body({"text": "read", "attachments": [attachment["id"]]},
+                                                  task_workspace=short_task_workspace)
+        finally:
+            self.harness.workspace = configured_workspace
+        self.assertEqual(prepared["_attachments"][0]["path"],
+                         f"tasks/4c51e087-3ca2-4b9a-9840-4383f6cd1e17/inputs/{attachment['id']}_alias.txt")
+        self.assertEqual((task_workspace / "inputs" / f"{attachment['id']}_alias.txt").read_bytes(), b"short alias")
 
     def test_task_copy_refuses_modified_destination_without_overwriting(self):
         attachment = self.upload(b"original bytes", name="keep.bin")
