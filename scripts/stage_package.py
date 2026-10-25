@@ -10,6 +10,7 @@ FLAT = ('server.py', 'supervisor.py', 'runtime_control.py', 'test_server.py',
         'android_mcp_server.py', 'test_android_mcp.py', 'phone_backends.py', 'test_phone_backends.py',
         'remote_protocol.py', 'test_remote_protocol.py', 'email_control.py', 'test_email_control.py',
         'test_remote_email_mcp.py', 'agent_context.py', 'test_agent_context.py', 'assistant_mcp_server.py', 'test_assistant_mcp.py',
+        'sms_control.py', 'test_sms_control.py',
         'models-deepseek.json', 'WORKSPACE_AGENTS.md', 'artifacts.py', 'test_artifacts.py', 'test_email_attachments.py')
 SCRIPT_FLAT = ('remote_email_mcp.py', 'assistant_client.py', 'test_assistant_client.py', 'install_assistant_skill.py', 'test_install_assistant_skill.py')
 

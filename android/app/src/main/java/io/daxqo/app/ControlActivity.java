@@ -95,6 +95,7 @@ public final class ControlActivity extends Activity {
             button(root, profile.setupButtonLabel, v -> openAppInfo());
         }
         button(root, "添加桌面控制入口", v -> pinShortcut());
+        button(root, "短信与 SIM 卡设置", v -> startActivity(new Intent(this, SmsSettingsActivity.class)));
         root.addView(text("手机未设置安全密码且没有 SIM 锁时，远程唤醒会尝试通过系统关闭滑动锁屏。安全密码、SIM 保护或无法确认的锁屏状态需要你亲自解锁。审批不会重启已暂停的控制，也不会替代系统要求的授权。", 14, Color.rgb(80, 90, 105)));
         root.addView(text("后台运行受手机系统和电池策略影响。请按需在系统应用信息中允许后台运行，并保持已有 Linux 环境在线。达氙不会更改厂商容器或绕过系统权限。", 14, Color.rgb(80, 90, 105)));
         activity = text("", 13, Color.rgb(100, 110, 125));

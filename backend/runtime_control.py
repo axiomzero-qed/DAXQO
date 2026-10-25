@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.7.0"
 DEFAULT_PORT = 18882
 DEFAULT_BACKEND_PORT = 18880
 MAX_REQUEST = 1024 * 1024
@@ -38,6 +38,7 @@ ALLOWED_FILES = {
     "remote_protocol.py", "test_remote_protocol.py", "email_control.py", "test_email_control.py",
     "remote_email_mcp.py", "test_remote_email_mcp.py", "agent_context.py", "test_agent_context.py", "assistant_mcp_server.py", "test_assistant_mcp.py",
     "assistant_client.py", "test_assistant_client.py", "install_assistant_skill.py", "test_install_assistant_skill.py", "daxqo_handoff_SKILL.md",
+    "sms_control.py", "test_sms_control.py",
 }
 
 

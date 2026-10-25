@@ -810,7 +810,7 @@ for line in sys.stdin:
             with urllib.request.urlopen(req) as response:
                 result = json.loads(response.read())
                 self.assertTrue(result["engine"]["connected"])
-                self.assertEqual(result["app"], {"name":"DAXQO", "version":"0.6.2"})
+                self.assertEqual(result["app"], {"name":"DAXQO", "version":"0.7.0"})
         finally:
             http.shutdown(); http.server_close()
 

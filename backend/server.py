@@ -28,6 +28,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 from task_services import TaskServices
 from email_control import MailControlService
+from sms_control import SmsControlService
 from android_mcp_server import AndroidBridge, BridgeError
 from agent_context import PhoneContext
 from artifacts import file_type, image_type, read_file, referenced_files
@@ -717,6 +718,7 @@ class Harness:
         self.phone_context = PhoneContext(lambda: AndroidBridge(self.state), enabled=test_engine is None)
         self.services = TaskServices(self)
         self.remote = MailControlService(self)
+        self.sms = SmsControlService(self)
         self.engine_path = shutil.which(codex) if not Path(codex).is_absolute() else (codex if Path(codex).is_file() else None)
         self.engine = test_engine
         if self.engine:
@@ -1645,7 +1647,7 @@ class Harness:
         if e and e.account_error: account["error"] = e.account_error
         active_rows = self.store.active_rows()
         active = next((r for r in active_rows if r["id"] == self.active_task_id), active_rows[0] if active_rows else None)
-        return {"app": {"name": "DAXQO", "version": "0.6.2"}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
+        return {"app": {"name": "DAXQO", "version": "0.7.0"}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
                 "engine": {"installed": bool(self.engine_path or self.engine), "version": e.version if e else None, "connected": bool(e and e.connected)},
                 "account": account, "activeTaskId": active["id"] if active else None, "activeTaskIds": [r["id"] for r in active_rows],
                 "workspace": str(self.workspace),
@@ -2183,6 +2185,7 @@ def create_handler(harness: Harness):
             if path == "/api/android/permissions": return self._json(200, harness.android_permissions())
             if path == "/api/approvals": return self._json(200, {"approvals": harness.approvals()})
             if path == "/api/provider": return self._json(200, harness.public_provider())
+            if path == "/api/sms": return self._json(200, harness.sms.public())
             if path == "/api/models":
                 return self._json(200, {"models": harness.models()})
             if path == "/api/tasks": return self._json(200, {"tasks": [harness.store.public(r) for r in harness.store.rows()]})
@@ -2212,9 +2215,18 @@ def create_handler(harness: Harness):
                     return self._json(200, harness.test_provider())
                 if path == "/api/provider":
                     return self._json(200, harness.save_provider(self._body()))
+                if path == "/api/sms/settings":
+                    return self._json(200, harness.sms.set_settings(self._body()))
+                if path == "/api/sms/contacts":
+                    return self._json(201, harness.sms.add_contact(self._body()))
                 if path == "/api/engine/reconnect":
                     return self._json(200, {"status": harness.reconnect()})
                 parts = path.split("/")
+                if len(parts) == 6 and parts[:4] == ["", "api", "sms", "contacts"]:
+                    if parts[5] == "toggle":
+                        return self._json(200, harness.sms.contact_action(parts[4], "toggle", self._body()))
+                    if parts[5] == "delete":
+                        return self._json(200, harness.sms.contact_action(parts[4], "delete", self._body()))
                 if len(parts) == 5 and parts[:4] == ["", "api", "android", "approvals"]:
                     return self._json(200, harness.decide_android_permission(parts[4], self._body().get("decision")))
                 if len(parts) == 4 and parts[:3] == ["", "api", "approvals"]:
@@ -2275,6 +2287,7 @@ def main() -> int:
         harness.services.start()
         harness.start_android_permissions()
         harness.remote.start()
+        harness.sms.start()
         server_thread.join()
     except KeyboardInterrupt:
         request_shutdown()
@@ -2284,6 +2297,7 @@ def main() -> int:
         http.server_close()
         harness.services.close()
         harness.remote.close()
+        harness.sms.close()
         harness.close_android_permissions()
         if harness.engine: harness.engine.close()
     return 0

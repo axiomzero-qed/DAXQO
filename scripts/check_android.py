@@ -34,7 +34,7 @@ def require(condition: bool, message: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=("standard", "xm"), default="standard")
-    parser.add_argument("--version-code", type=int, default=14)
+    parser.add_argument("--version-code", type=int, default=17)
     parser.add_argument("--java-home", type=Path, default=os.environ.get("JAVA_HOME"))
     parser.add_argument("--sdk-root", type=Path,
                         default=os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT"))
@@ -62,6 +62,7 @@ def main() -> None:
         ("io.daxqo.app.VoiceTranscriptAccumulatorRegression", [source / "VoiceTranscriptAccumulator.java"]),
         ("io.daxqo.app.ApprovalLedgerRegression", []),
         ("io.daxqo.app.PassiveCallbacksRegression", []),
+        ("io.daxqo.app.SmsPolicyRegression", [source / "SmsPolicy.java"]),
     )
     compile_path = os.pathsep.join(map(str, (classes, android_jar)))
     runtime_path = os.pathsep.join(map(str, (output, classes, android_jar)))

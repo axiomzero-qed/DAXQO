@@ -174,6 +174,12 @@ class AndroidBridge:
                          and set(query) <= {"query", "limit"} and all(len(v) == 1 for v in query.values()))
             except ValueError:
                 route = False
+        if method == "GET" and path == "/api/sms/status":
+            route = True
+        if method == "POST" and path in ("/api/sms/config", "/api/sms/query", "/api/sms/send"):
+            route = self._valid_sms_body(path, body)
+        if method == "GET" and re.fullmatch(r"/api/sms/sends/[A-Za-z0-9][A-Za-z0-9._-]{0,127}", path):
+            route = True
         owner_decision = method == "POST" and re.fullmatch(
             r"/api/device/approvals/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", path)
         if not route and not owner_decision:
@@ -215,6 +221,37 @@ class AndroidBridge:
             raise BridgeError("invalid_response", "Android bridge returned an invalid response")
         return value
 
+    @staticmethod
+    def _valid_sms_body(path: str, body: Any) -> bool:
+        if not isinstance(body, dict): return False
+        def integer(value, minimum=0):
+            return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+        def mobile(value):
+            if not isinstance(value, str): return False
+            return bool(re.fullmatch(r"\+86(1[3-9][0-9]{9})", value))
+        def short_text(value):
+            if not isinstance(value, str) or not value: return False
+            try: return len(value.encode("utf-16-le", errors="strict")) // 2 <= 70
+            except UnicodeEncodeError: return False
+        if path == "/api/sms/config":
+            if set(body) == {"enabled"} and body["enabled"] is False: return True
+            return (set(body) == {"enabled", "subscriptionId"} and type(body["enabled"]) is bool
+                    and integer(body["subscriptionId"]))
+        if path == "/api/sms/query":
+            if set(body) - {"since", "afterId", "limit", "senders"} or not {"since", "afterId", "limit"} <= set(body): return False
+            if not integer(body["since"]) or not integer(body["afterId"]): return False
+            if not integer(body["limit"], 1) or body["limit"] > 50: return False
+            senders = body.get("senders")
+            return senders is None or (isinstance(senders, list) and len(senders) <= 50
+                                       and all(mobile(item) for item in senders))
+        if path == "/api/sms/send":
+            if set(body) != {"subscriptionId", "to", "text", "clientRequestId"}: return False
+            text, request_id = body["text"], body["clientRequestId"]
+            return (integer(body["subscriptionId"]) and mobile(body["to"])
+                    and short_text(text)
+                    and isinstance(request_id, str) and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", request_id)))
+        return False
+
     def status(self) -> dict[str, Any]:
         return _public_value(self.request("GET", "/api/device/status"))
 
@@ -250,6 +287,12 @@ class AndroidBridge:
 
 
 TOOL_DEFINITIONS = [
+    {"name": "android_read_sms", "description": "Read SMS messages from the paired Android phone. This exposes private message content; use only when the user asks for it. An optional sender limits results to one Chinese mobile number. Does not send messages or create tasks.",
+     "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+     "inputSchema": {"type": "object", "properties": {
+         "sender": {"type": "string", "description": "Optional mainland China mobile number: 11 digits, 86 prefix, +86, or 0086"},
+         "since": {"type": "integer", "minimum": 0, "description": "Optional received-at cutoff in Unix milliseconds"},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10}}, "additionalProperties": False}},
     {"name": "android_apps", "description": "Find already-installed, enabled launcher apps by name or package before opening a store or browser. Read-only metadata; no accounts, phone number, private content or location. An unavailable/truncated catalog is not proof an app is absent.",
      "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
      "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "maxLength": 80}, "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80}}, "additionalProperties": False}},
@@ -338,6 +381,16 @@ def _validate_action_args(action: str, args: Any, expected_package: Any) -> dict
     return result
 
 
+def _normalize_sms_sender(value: Any) -> str:
+    if not isinstance(value, str):
+        raise BridgeError("invalid_args", "sender must be a Chinese mainland mobile number")
+    raw = value.strip()
+    match = re.fullmatch(r"(?:\+86|0086|86)?(1[3-9][0-9]{9})", raw)
+    if not match:
+        raise BridgeError("invalid_args", "sender must be a Chinese mainland mobile number")
+    return "+86" + match.group(1)
+
+
 class AndroidMCP:
     def __init__(self, bridge: PhoneBackend):
         self.bridge = bridge
@@ -356,6 +409,22 @@ class AndroidMCP:
             return self._tool_result([self._text(self.bridge.apps(args.get("query", ""), args.get("limit", 80)))])
         if name == "android_status":
             return self._tool_result([self._text(self.bridge.status())])
+        if name == "android_read_sms":
+            if set(args) - {"sender", "since", "limit"}:
+                raise BridgeError("invalid_args", "Unsupported SMS query argument")
+            sender = args.get("sender")
+            if sender is not None:
+                sender = _normalize_sms_sender(sender)
+            since = args.get("since", 0)
+            limit = args.get("limit", 10)
+            if isinstance(since, bool) or not isinstance(since, int) or since < 0:
+                raise BridgeError("invalid_args", "since must be a non-negative millisecond timestamp")
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
+                raise BridgeError("invalid_args", "limit must be between 1 and 20")
+            request = {"since": since, "afterId": 0, "limit": limit}
+            if sender: request["senders"] = [sender]
+            result = self.bridge.request("POST", "/api/sms/query", request)
+            return self._tool_result([self._text(result)])
         if name == "android_observe":
             include_tree = args.get("includeTree", True)
             include_screenshot = args.get("includeScreenshot", False)
@@ -393,7 +462,6 @@ class AndroidMCP:
             action_args = _validate_action_args(action, args.get("args", {}), expected)
             return self._tool_result([self._text(self.bridge.execute(action, action_args))])
         raise BridgeError("unknown_tool", "Unknown Android control tool")
-
     def dispatch(self, message: Any) -> dict[str, Any] | None:
         if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
             return {"jsonrpc": "2.0", "id": message.get("id") if isinstance(message, dict) else None,

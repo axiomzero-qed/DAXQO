@@ -32,6 +32,8 @@ class BridgeFixture(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._record()
+        if self.path == "/api/sms/status": return self._send(200, {"enabled": False})
+        if self.path.startswith("/api/sms/sends/"): return self._send(200, {"id": self.path.rsplit("/", 1)[-1], "status": "sent"})
         if self.path == "/api/device/status" and getattr(self.server, "redirect_status", False):
             return self._send(302, {}, {"Location": f"http://127.0.0.1:{self.server.server_port}/redirect-target"})
         if self.path == "/redirect-target": return self._send(200, {"followed": True})
@@ -45,6 +47,9 @@ class BridgeFixture(BaseHTTPRequestHandler):
     def do_POST(self):
         self._record()
         request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+        self.server.seen[-1]["body"] = request
+        if self.path == "/api/sms/query": return self._send(200, {"subscriptionId": 1, "messages": [], "query": request})
+        if self.path in ("/api/sms/config", "/api/sms/send"): return self._send(200, {"status": "queued", "id": "send-1"})
         if self.path.startswith("/api/device/approvals/"):
             return self._send(200, {"id": self.path.rsplit("/", 1)[-1],
                                     "status": "approved" if request["decision"] == "accept" else "declined"})
@@ -109,7 +114,8 @@ class AndroidMCPTests(unittest.TestCase):
         self.assertNotIn("must-not-leak", json.dumps(response))
 
     def test_adapter_exposes_no_self_approval_or_policy_change_tool(self):
-        self.assertEqual({t["name"] for t in mcp.TOOL_DEFINITIONS}, {"android_status", "android_apps", "android_observe", "android_action"})
+        self.assertEqual({t["name"] for t in mcp.TOOL_DEFINITIONS}, {"android_status", "android_apps", "android_observe", "android_action", "android_read_sms"})
+        self.assertNotIn("android_send_sms", {t["name"] for t in mcp.TOOL_DEFINITIONS})
         response = self.server.dispatch({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"android_approve", "arguments":{}}})
         self.assertTrue(response["result"]["isError"])
 
@@ -127,6 +133,32 @@ class AndroidMCPTests(unittest.TestCase):
         for args in ({"query":"x"*81},{"limit":True},{"limit":0}):
             with self.assertRaises(mcp.BridgeError): self.server.call_tool("android_apps",args)
         self.assertEqual(len(self.http.seen),before)
+
+    def test_sms_mcp_read_is_bounded_and_bridge_routes_are_exact(self):
+        result = self.server.call_tool("android_read_sms", {"sender": "13800138000", "limit": 2, "since": 123})
+        self.assertIn('"subscriptionId":1', result["content"][0]["text"])
+        self.assertEqual(self.http.seen[-1]["body"], {"since": 123, "afterId": 0, "limit": 2, "senders": ["+8613800138000"]})
+        before = len(self.http.seen)
+        for args in ({"sender": "10086"}, {"limit": True}, {"limit": 21}, {"since": -1}, {"x": 1}):
+            with self.subTest(args=args), self.assertRaises(mcp.BridgeError):
+                self.server.call_tool("android_read_sms", args)
+        self.assertEqual(len(self.http.seen), before)
+        self.assertEqual(self.bridge.request("GET", "/api/sms/status"), {"enabled": False})
+        self.assertEqual(self.bridge.request("GET", "/api/sms/sends/send-1")["status"], "sent")
+        self.assertEqual(self.bridge.request("POST", "/api/sms/config", {"enabled": False}), {"status": "queued", "id": "send-1"})
+        for method, path, body in (
+            ("GET", "/api/sms/status?x=1", None),
+            ("GET", "/api/sms/../device/status", None),
+            ("POST", "/api/sms/send", {"subscriptionId": True, "to": "+8613800138000", "text": "x", "clientRequestId": "r"}),
+            ("POST", "/api/sms/query", {"since": 1, "afterId": True, "limit": 1}),
+            ("POST", "/api/sms/config?x=1", {"enabled": False, "subscriptionId": None}),
+            ("POST", "/api/sms/config", {"enabled": True, "subscriptionId": None}),
+            ("POST", "/api/sms/send", {"subscriptionId": 1, "to": "+8613800138000", "text": "\ud800", "clientRequestId": "r"}),
+            ("POST", "/api/sms/send", {"subscriptionId": 1, "to": "+8613800138000", "text": "x", "clientRequestId": "-bad"}),
+        ):
+            with self.subTest(path=path), self.assertRaises(mcp.BridgeError):
+                self.bridge.request(method, path, body)
+        self.assertEqual(len(self.http.seen), before + 3)
 
     def test_owner_decision_traverses_authenticated_bridge_without_becoming_agent_tool(self):
         ident = "746bdd02-1c84-4f1a-9ed4-cb880402f4ec"
@@ -337,7 +369,7 @@ class AndroidMCPTests(unittest.TestCase):
         self.assertEqual(len(replies), 2)
         self.assertEqual(replies[0]["result"]["protocolVersion"], "2025-06-18")
         self.assertEqual({tool["name"] for tool in replies[1]["result"]["tools"]},
-                         {"android_status", "android_apps", "android_observe", "android_action"})
+                         {"android_status", "android_apps", "android_observe", "android_action", "android_read_sms"})
 
     def test_tool_annotations_do_not_disguise_device_actions_as_read_only(self):
         definitions = {tool["name"]: tool for tool in mcp.TOOL_DEFINITIONS}
