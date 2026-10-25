@@ -17,7 +17,9 @@ class FakeHarness:
         self.provider_dir.mkdir()
         self.state = root / "bridge-state"
         self.state.mkdir()
-        (self.state / "capability").write_text("fixture-capability-0123456789abcdef", encoding="ascii")
+        capability = self.state / "capability"
+        capability.write_text("fixture-capability-0123456789abcdef", encoding="ascii")
+        capability.chmod(0o600)
         self.started = []
 
     @staticmethod
