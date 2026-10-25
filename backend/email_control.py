@@ -7,12 +7,15 @@ from email.parser import BytesParser
 from email.utils import format_datetime, getaddresses, make_msgid, parsedate_to_datetime
 from html.parser import HTMLParser
 import datetime as dt
+import base64
+import binascii
 import hashlib
 import imaplib
 import json
 import os
 from pathlib import Path
 import re
+import quopri
 import secrets
 import smtplib
 import sqlite3
@@ -33,6 +36,10 @@ DEFAULT_IMAP = "imap.163.com"
 DEFAULT_SMTP = "smtp.163.com"
 PLAIN_MAX_AGE = 24 * 60 * 60
 PLAIN_MAX_PROMPT = 8000
+# Exact sender/signing domains, never suffix matches or interchangeable aliases.
+PLAIN_PROVIDERS = {"gmail.com": ("Gmail", 2048), "qq.com": ("QQ", 1024),
+                   "foxmail.com": ("QQ/Foxmail", 1024), "163.com": ("网易", 1024),
+                   "126.com": ("网易", 1024), "yeah.net": ("网易", 1024)}
 
 # Optional, app-local dependencies; absence disables ordinary mail only.
 _mail_libs = Path(__file__).resolve().parent / "runtime" / "mail-libs"
@@ -115,26 +122,110 @@ def _approval_like_subject(subject: str) -> bool:
     return _plain_approval_command(candidate) is not None
 
 
+def _plain_provider(sender: str):
+    domain = normalize_email(sender).rsplit("@", 1)[1]
+    if domain not in PLAIN_PROVIDERS:
+        raise ValueError("普通邮件支持已登记的 Gmail、QQ/Foxmail 和网易（163/126/yeah）联系人")
+    return domain, *PLAIN_PROVIDERS[domain]
+
+
+def _wire_text(raw: bytes, charset: str | None = None) -> str:
+    encodings = [charset] if charset else ["utf-8", "gb18030"]
+    for encoding in encodings:
+        try:
+            text = raw.decode(encoding)
+            if any(ord(ch) < 32 and ch not in "\r\n\t" for ch in text) or "\x7f" in text:
+                raise ValueError("邮件正文不是普通文字")
+            return text
+        except (UnicodeError, LookupError):
+            continue
+    raise ValueError("邮件正文编码不受支持，请使用邮箱自带网页或 App 发送文字邮件")
+
+
+def _authenticated_mime(raw: bytes, message, signed: set[str]):
+    """Unsigned outer MIME headers must not change a verified provider body.
+
+    QQ often signs only addressing headers. Infer its outer container/encoding
+    from the signed wire body, using a fixed order independent of unsigned
+    headers. Inner MIME headers are inside the DKIM-authenticated body.
+    """
+    _, body = dkim.rfc822_parse(raw)
+    trusted_type = message.get_content_type() if "content-type" in signed else None
+    composite = trusted_type and trusted_type.startswith("multipart/")
+    encoding = str(message.get("Content-Transfer-Encoding", "")).strip().lower() if "content-transfer-encoding" in signed else None
+    charset = message.get_content_charset() if "content-type" in signed else None
+    if composite:
+        if encoding and encoding not in ("7bit", "8bit", "binary"):
+            raise ValueError("多段邮件的外层编码无效")
+    elif encoding in ("base64", "quoted-printable"):
+        try:
+            body = base64.b64decode(re.sub(rb"\s+", b"", body), validate=True) if encoding == "base64" else quopri.decodestring(body)
+        except (ValueError, binascii.Error):
+            raise ValueError("邮件正文无法解码") from None
+    elif encoding not in (None, "", "7bit", "8bit", "binary"):
+        raise ValueError("邮件正文编码不受支持")
+
+    boundary = None
+    if trusted_type is None:
+        match = re.search(rb"(?:\A|\r\n)--([A-Za-z0-9'()+_,./:=?\-]{1,70})\r\n(?=[A-Za-z0-9-]+:)", body[:2048])
+        if match:
+            boundary = match.group(1)
+            closing = rb"(?:\A|\r\n)--" + re.escape(boundary) + rb"--(?:\r\n|\Z)"
+            if not re.search(closing, body): raise ValueError("邮件多段正文不完整")
+            composite = True
+    if composite:
+        content_type = str(message["Content-Type"]) if trusted_type else 'multipart/mixed; boundary="' + boundary.decode("ascii") + '"'
+        view = BytesParser(policy=policy.default).parsebytes(("MIME-Version: 1.0\r\nContent-Type: " + content_type + "\r\n\r\n").encode("ascii") + body)
+        parts = list(view.walk())
+        if len(parts) > 64 or any(part.defects or any(len(part.get_all(name, [])) > 1 for name in (
+                "content-type", "content-transfer-encoding", "content-disposition", "mime-version")) for part in parts):
+            raise ValueError("邮件多段正文格式无效")
+        return view
+
+    if not encoding:
+        # Prefer a valid encoded text payload over literal wire encoding. No
+        # unsigned Content-Transfer-Encoding or charset participates in this choice.
+        compact = re.sub(rb"\s+", b"", body)
+        decoded_base64 = False
+        if compact and len(compact) % 4 == 0 and re.fullmatch(rb"[A-Za-z0-9+/]+={0,2}", compact):
+            try:
+                decoded = base64.b64decode(compact, validate=True)
+                _wire_text(decoded, charset or "utf-8")
+                body = decoded
+                decoded_base64 = True
+            except (ValueError, binascii.Error): pass
+        if not decoded_base64 and re.search(rb"=(?:[A-Fa-f0-9]{2}|\r\n)", body) and not re.search(rb"=(?![A-Fa-f0-9]{2}|\r\n)", body):
+            body = quopri.decodestring(body)
+    text = _wire_text(body, charset)
+    view = EmailMessage()
+    body_is_html = trusted_type is None and re.match(r"\s*(?:<!doctype\s+html\b|<html\b|<body\b)", text, re.I)
+    subtype = "html" if trusted_type == "text/html" or body_is_html else "plain"
+    if trusted_type and trusted_type not in ("text/plain", "text/html"):
+        raise ValueError("普通邮件任务只支持文字正文")
+    view.set_content(text, subtype=subtype, charset="utf-8")
+    return view
+
+
 def _verify_plain_email(raw: bytes, sender: str, receiver: str, since: str, *, now=None, dnsfunc=None) -> dict:
     """Authenticate the complete received bytes before interpreting instructions.
 
-    Initial provider scope is personal Gmail. Never trust Authentication-Results
-    or a From header alone. DKIM verification is delegated to dkimpy.
+    Never trust Authentication-Results or a From header alone. QQ/NetEase
+    use provider-compatible DKIM keys and a body-derived MIME interpretation.
     """
     if not raw or len(raw) > MAX_MESSAGE: raise ValueError("邮件超过96KiB限制")
     if dkim is None: raise ValueError("普通邮件身份验证组件尚未安装")
-    if normalize_email(sender).rsplit("@", 1)[1] != "gmail.com":
-        raise ValueError("普通邮件自动处理目前仅支持已登记的 Gmail 联系人")
+    domain, provider_name, minimum_key = _plain_provider(sender)
     try:
         msg = BytesParser(policy=policy.default).parsebytes(raw)
     except Exception:
         raise ValueError("邮件格式无效，未创建任务") from None
     required = {"from", "to", "subject", "date", "message-id", "content-type", "mime-version"}
-    if any(len(msg.get_all(name, [])) != 1 for name in required):
+    present_required = required if domain == "gmail.com" else {"from", "to", "subject", "date", "message-id"}
+    if any(len(msg.get_all(name, [])) != 1 for name in present_required):
         raise ValueError("邮件关键头缺失或重复，无法确认身份")
-    for name in ("content-transfer-encoding", "sender", "reply-to"):
+    for name in ("content-transfer-encoding", "content-type", "mime-version", "sender", "reply-to"):
         if len(msg.get_all(name, [])) > 1: raise ValueError("邮件头重复，无法确认身份")
-    addresses = [a for _, a in getaddresses(msg.get_all("From", [])) if a]
+    addresses = [normalize_email(a) for _, a in getaddresses(msg.get_all("From", [])) if a]
     if addresses != [sender] or any(msg.get_all(name, []) for name in ("Resent-From", "Resent-To", "Resent-Date")):
         raise ValueError("发件人与可信联系人不一致")
     recipients = [a.lower() for _, a in getaddresses(msg.get_all("To", [])) if a]
@@ -146,32 +237,47 @@ def _verify_plain_email(raw: bytes, sender: str, receiver: str, since: str, *, n
     # An unsigned MIME interpretation header can change the meaning of a signed body.
     if msg.get_all("Content-Transfer-Encoding", []): required.add("content-transfer-encoding")
     try:
-        verifier = dkim.DKIM(raw, minkey=2048, timeout=5)
+        verifier = dkim.DKIM(raw, minkey=minimum_key, timeout=5)
     except Exception:
         raise ValueError("邮件签名格式无效，未创建任务") from None
-    authenticated = False
+    authenticated = None
     signatures = [value for name, value in verifier.headers if name.lower() == b"dkim-signature"]
     for index, value in enumerate(signatures[:5]):
         try:
             fields = dkim.parse_tag_value(value)
             signed = {name.strip().lower().decode("ascii") for name in fields.get(b"h", b"").split(b":")}
-            if (fields.get(b"d", b"").lower() != b"gmail.com" or fields.get(b"a") != b"rsa-sha256"
-                    or b"l" in fields or not required.issubset(signed)):
+            coverage = required if domain == "gmail.com" else {"from", "to", "subject"}
+            if (fields.get(b"d", b"").lower() != domain.encode("ascii") or fields.get(b"a") != b"rsa-sha256"
+                    or b"l" in fields or not coverage.issubset(signed)):
                 continue
             if verifier.verify(index, **({"dnsfunc": dnsfunc} if dnsfunc is not None else {})):
-                authenticated = True
+                if "date" not in signed:
+                    timestamp = fields.get(b"t", b"")
+                    if not re.fullmatch(rb"[0-9]{1,12}", timestamp): continue
+                    signed_date = EmailMessage()
+                    signed_date["Date"] = format_datetime(dt.datetime.fromtimestamp(int(timestamp), dt.timezone.utc))
+                    _plain_date(signed_date, since, now)
+                authenticated = (fields, signed)
                 break
         except Exception:
             continue
-    if not authenticated: raise ValueError("Gmail 发件签名未通过验证，未执行；请检查网络或使用 Agent/MCP")
+    if not authenticated: raise ValueError(provider_name + " 发件签名未通过验证，未执行；请检查网络或使用 Agent/MCP")
     if msg.get("Auto-Submitted", "no").lower() != "no" or msg.get("List-Id"):
         raise ValueError("自动通知或邮件列表不作为任务执行")
     # Preserve the complete decoded subject for task interpretation. Receipt
     # and UI presentation call _receipt_subject with its default short limit.
     subject = MailControlService._receipt_subject(msg["Subject"], limit=None)
-    nonce = "plain:" + hashlib.sha256((sender + "\n" + message_id).encode("utf-8")).hexdigest()
+    fields, signed = authenticated
+    identity = message_id if domain == "gmail.com" else domain + ":" + re.sub(rb"\s+", b"", fields[b"b"]).decode("ascii")
+    nonce = "plain:" + hashlib.sha256((sender + "\n" + identity).encode("utf-8")).hexdigest()
     command = {"action": "submit", "title": subject[:100] or "邮箱任务", "nonce": nonce,
                "messageId": message_id, "subject": subject}
+    if msg.get_content_disposition() == "attachment" or msg.get_filename():
+        raise _AuthenticatedMailRejected("普通邮件任务暂不支持附件，请直接在正文说明任务", command)
+    if domain != "gmail.com":
+        try: msg = _authenticated_mime(raw, msg, signed)
+        except (ValueError, UnicodeError) as error:
+            raise _AuthenticatedMailRejected(str(error), command) from None
     if any(part.get_content_disposition() == "attachment" or part.get_filename() for part in msg.walk()):
         raise _AuthenticatedMailRejected("普通邮件任务暂不支持附件，请直接在正文说明任务", command)
     part = msg.get_body(preferencelist=("plain", "html"))
@@ -256,6 +362,9 @@ class MailControlService:
             self.store.db.execute("CREATE TABLE IF NOT EXISTS mail_receipts (id TEXT PRIMARY KEY,contact_id TEXT NOT NULL,contact_email TEXT NOT NULL,subject TEXT NOT NULL,status TEXT NOT NULL,reason TEXT NOT NULL,received_at TEXT NOT NULL,header_hash TEXT NOT NULL UNIQUE)")
             self.store.db.execute("CREATE TABLE IF NOT EXISTS mail_approval_notices (approval_id TEXT PRIMARY KEY,task_id TEXT NOT NULL,contact_id TEXT NOT NULL,command_id TEXT NOT NULL UNIQUE,status TEXT NOT NULL,created_at TEXT NOT NULL)")
             self.store.db.execute("CREATE TABLE IF NOT EXISTS mail_reply_parts (command_id TEXT NOT NULL,part INTEGER NOT NULL,parts INTEGER NOT NULL,message_id TEXT NOT NULL,status TEXT NOT NULL,attachment_count INTEGER NOT NULL DEFAULT 0,sent_at TEXT,PRIMARY KEY(command_id,part),FOREIGN KEY(command_id) REFERENCES mail_commands(id))")
+            self.store.db.execute("CREATE TABLE IF NOT EXISTS mail_features (name TEXT PRIMARY KEY,enabled_at TEXT NOT NULL)")
+            self.store.db.execute("INSERT OR IGNORE INTO mail_features(name,enabled_at) VALUES('qq-netease-plain-v1',?)", (_stamp(),))
+            self._domestic_since = self.store.db.execute("SELECT enabled_at FROM mail_features WHERE name='qq-netease-plain-v1'").fetchone()[0]
             receipt_columns = {row[1] for row in self.store.db.execute("PRAGMA table_info(mail_receipts)")}
             if "task_id" not in receipt_columns: self.store.db.execute("ALTER TABLE mail_receipts ADD COLUMN task_id TEXT")
         with self.store.lock, self.store.db:
@@ -380,8 +489,9 @@ class MailControlService:
                           "imapPort": 993, "smtpHost": config.get("smtpHost", DEFAULT_SMTP), "smtpPort": 465,
                           "passwordConfigured": bool(config.get("password")), "lastPollAt": self._last_poll_at,
                           "plainEmailEnabled": config.get("plainEmailEnabled", False), "plainEmailSince": config.get("plainEmailSince", ""),
+                          "domesticEmailSince": self._domestic_since,
                           "plainEmailReady": dkim is not None,
-                          "plainEmailReason": "Gmail 发件签名验证已就绪" if dkim is not None else "请安装 DAXQO 邮件身份验证组件",
+                          "plainEmailReason": "可信邮箱发件签名验证已就绪" if dkim is not None else "请安装 DAXQO 邮件身份验证组件",
                           "lastError": self.harness.safe_text(self.last_error, 200) if self.last_error else None},
                 "contacts": [{"id": r["id"], "email": r["email"], "enabled": bool(r["enabled"]), "keyConfigured": True,
                               "createdAt": r["created_at"], **({"lastUsedAt": r["last_used_at"]} if r["last_used_at"] else {})} for r in contacts],
@@ -556,12 +666,11 @@ class MailControlService:
                 if ordinary:
                     if self._plain_header_claimed(contact, headers): continue
                     if not config.get("plainEmailEnabled"):
-                        self._record_receipt(contact, subject, "普通邮件未包含签名命令，未创建任务；可在本机开启本人 Gmail 普通邮件自动处理", header_hash)
+                        self._record_receipt(contact, subject, "普通邮件未包含签名命令，未创建任务；可在本机开启可信邮箱普通邮件自动处理", header_hash)
                         continue
                     try:
                         if dkim is None: raise ValueError("普通邮件身份验证组件尚未安装")
-                        if contact["email"].rsplit("@", 1)[1] != "gmail.com":
-                            raise ValueError("普通邮件自动处理目前仅支持已登记的 Gmail 联系人")
+                        _plain_provider(contact["email"])
                         _plain_date(headers, self._plain_since(config, contact))
                     except ValueError as error:
                         self._record_receipt(contact, subject, str(error), header_hash)
@@ -634,15 +743,22 @@ class MailControlService:
                                       (str(uuid.uuid4()), contact["id"], contact["email"], subject[:200], status, reason[:200], _stamp(), header_hash, task_id))
                 self.store.db.execute("DELETE FROM mail_receipts WHERE id NOT IN (SELECT id FROM mail_receipts ORDER BY received_at DESC LIMIT 100)")
 
-    @staticmethod
-    def _plain_since(config, contact):
-        return max(config.get("plainEmailSince", ""), contact.get("plain_since") or contact.get("created_at", ""))
+    def _plain_since(self, config, contact):
+        times = [config.get("plainEmailSince", ""), contact.get("plain_since") or contact.get("created_at", "")]
+        if contact["email"].rsplit("@", 1)[1] in PLAIN_PROVIDERS and not contact["email"].endswith("@gmail.com"):
+            times.append(self._domestic_since)
+        return max(times)
 
     def _plain_header_claimed(self, contact, headers):
         """Untrusted metadata can suppress a duplicate, never authorize an action."""
         values = headers.get_all("Message-ID", [])
         if len(values) != 1: return False
-        nonce = "plain:" + hashlib.sha256((contact["email"] + "\n" + str(values[0]).strip()).encode("utf-8")).hexdigest()
+        message_id = str(values[0]).strip()
+        if contact["email"].rsplit("@", 1)[1] != "gmail.com":
+            with self.store.lock:
+                return self.store.db.execute("SELECT 1 FROM mail_commands WHERE contact_id=? AND message_id=? LIMIT 1",
+                                             (contact["id"], message_id)).fetchone() is not None
+        nonce = "plain:" + hashlib.sha256((contact["email"] + "\n" + message_id).encode("utf-8")).hexdigest()
         with self.store.lock:
             return self.store.db.execute("SELECT 1 FROM mail_commands WHERE nonce=?", (nonce,)).fetchone() is not None
 
@@ -680,10 +796,10 @@ class MailControlService:
             with self.store.lock:
                 row = self.store.db.execute("SELECT status,task_id FROM mail_commands WHERE id=?", (command_id,)).fetchone()
             if row and row["task_id"] and command["action"] == "submit":
-                self._record_receipt(contact, subject, "已验证本人 Gmail，已创建任务", header_hash, status="accepted", task_id=row["task_id"])
+                self._record_receipt(contact, subject, "已验证可信邮箱身份，已创建任务", header_hash, status="accepted", task_id=row["task_id"])
                 self._send_plain_ack(command_id, authenticated_contact, row["task_id"])
             elif row and command["action"] != "submit":
-                self._record_receipt(contact, subject, "已验证本人 Gmail，已处理审批指令", header_hash, status="accepted", task_id=row["task_id"])
+                self._record_receipt(contact, subject, "已验证可信邮箱身份，已处理审批指令", header_hash, status="accepted", task_id=row["task_id"])
             else:
                 self._record_receipt(contact, subject, "身份验证已通过，但任务未能启动，请查看最近命令", header_hash, status="failed")
             return bool(row and row["task_id"])
@@ -1172,7 +1288,7 @@ class MailControlService:
                 cursor = self.store.db.execute("UPDATE mail_commands SET ack_status='sending' WHERE id=? AND transport='plain' AND ack_status='pending'", (command_id,))
                 if cursor.rowcount != 1: return
         message = self._plain_message(command_id, config, contact, "达氙已接单：",
-            "已验证你的 Gmail 身份，已在手机创建任务，正在排队或执行。\n\n任务编号：" + task_id
+            "已验证你的可信邮箱身份，已在手机创建任务，正在排队或执行。\n\n任务编号：" + task_id
             + "\n\n完成或遇到系统限制后会通过本邮箱回报，也可在手机 DAXQO 查看进度。若需要权限审批，可通过 DAXQO 或待审批邮件作决定；不要求你代为操作手机。")
         try:
             self._transmit(config, contact, message)
