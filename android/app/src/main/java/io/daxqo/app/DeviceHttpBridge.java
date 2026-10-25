@@ -86,6 +86,7 @@ final class DeviceHttpBridge {
             String cap = service.getSharedPreferences("pairing_private", android.content.Context.MODE_PRIVATE).getString("capability", "");
             String supplied = headers.get("authorization");
             if (cap.length() < 32 || supplied == null || !MessageDigest.isEqual(("Bearer " + cap).getBytes(StandardCharsets.UTF_8), supplied.getBytes(StandardCharsets.UTF_8))) { reply(client, 401, error("unauthorized", "本机服务尚未配对或认证失败")); return; }
+            if (start[1].startsWith("/api/sms/")) { handleSms(client, input, start[0], start[1], headers); return; }
             if ("GET".equals(start[0]) && "/api/device/status".equals(start[1])) { reply(client, 200, DeviceState.status(service)); return; }
             if ("GET".equals(start[0]) && "/api/device/approvals".equals(start[1])) { reply(client, 200, new JSONObject().put("approvals", DeviceState.approvalList())); return; }
             if ("GET".equals(start[0]) && start[1].startsWith("/api/device/apps")) {
@@ -151,6 +152,36 @@ final class DeviceHttpBridge {
             for (Map.Entry<String, Cached> item : completed.entrySet()) journal.put(item.getKey(), new JSONObject().put("digest", item.getValue().digest).put("response", item.getValue().response));
             return DeviceState.prefs(service).edit().putString("request_journal", journal.toString()).commit();
         } catch (Exception ignored) { return false; }
+    }
+    private void handleSms(Socket client, InputStream input, String method, String path, Map<String, String> headers) throws Exception {
+        SmsController sms = new SmsController(service);
+        try {
+            if ("GET".equals(method) && "/api/sms/status".equals(path)) { reply(client, 200, sms.status()); return; }
+            if ("GET".equals(method) && path.startsWith("/api/sms/sends/")) {
+                reply(client, 200, sms.sendStatus(URLDecoder.decode(path.substring("/api/sms/sends/".length()), "UTF-8"))); return;
+            }
+            if (!"POST".equals(method) || !("/api/sms/config".equals(path) || "/api/sms/query".equals(path) || "/api/sms/send".equals(path))) {
+                reply(client, 404, error("not_found", "短信接口不存在")); return;
+            }
+            String mime = headers.get("content-type");
+            if (mime == null || !mime.toLowerCase(Locale.ROOT).matches("application/json(?:\\s*;.*)?")) {
+                reply(client, 415, error("invalid_request", "短信接口仅接受 JSON")); return;
+            }
+            int length;
+            try { length = Integer.parseInt(headers.get("content-length")); }
+            catch (Exception ignored) { reply(client, 411, error("invalid_request", "缺少有效请求长度")); return; }
+            if (length < 2 || length > 16384) { reply(client, 413, error("invalid_request", "短信请求超过限制")); return; }
+            byte[] bytes = new byte[length];
+            int offset = 0;
+            while (offset < length) { int count = input.read(bytes, offset, length - offset); if (count < 0) throw new java.io.IOException("short SMS request"); offset += count; }
+            JSONObject request;
+            try { request = new JSONObject(new String(bytes, StandardCharsets.UTF_8)); }
+            catch (Exception ignored) { reply(client, 400, error("invalid_request", "短信请求 JSON 无效")); return; }
+            JSONObject result = "/api/sms/config".equals(path) ? sms.configure(request) : "/api/sms/query".equals(path) ? sms.query(request) : sms.send(request);
+            reply(client, 200, result);
+        } catch (SmsController.Failure error) { reply(client, 409, error(error.code, error.getMessage())); }
+        catch (SecurityException ignored) { reply(client, 403, error("permission_required", "系统尚未允许短信访问，请在本机授权")); }
+        catch (IllegalArgumentException error) { reply(client, 400, error("invalid_args", error.getMessage())); }
     }
     private String Base64Digest(byte[] bytes) throws Exception {
         return android.util.Base64.encodeToString(MessageDigest.getInstance("SHA-256").digest(bytes), android.util.Base64.NO_WRAP);

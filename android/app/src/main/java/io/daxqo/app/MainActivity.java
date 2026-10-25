@@ -287,6 +287,7 @@ public final class MainActivity extends Activity {
         });
         webView.addJavascriptInterface(new FileDownloads(), "DAXQOFiles");
         webView.addJavascriptInterface(new VoiceBridge(), "DAXQOVoice");
+        webView.addJavascriptInterface(new SmsSettingsBridge(), "DAXQOSms");
         webView.setVisibility(View.GONE);
         root.addView(webView, new LinearLayout.LayoutParams(-1, 0, 1));
         if (Build.VERSION.SDK_INT >= 35) {
@@ -457,6 +458,15 @@ public final class MainActivity extends Activity {
         runOnUiThread(() -> {
             if (mayUseVoice()) webView.evaluateJavascript(script, null);
         });
+    }
+
+    private final class SmsSettingsBridge {
+        @JavascriptInterface public void openSettings() {
+            runOnUiThread(() -> {
+                if (isTrustedGuiVisible() && hasWindowFocus())
+                    startActivity(new Intent(MainActivity.this, SmsSettingsActivity.class));
+            });
+        }
     }
 
     private final class VoiceBridge {

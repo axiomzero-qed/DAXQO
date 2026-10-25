@@ -219,7 +219,7 @@ class AssistantMCPTests(unittest.TestCase):
         self.server.serve(io.BytesIO(data), output)
         replies = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual(len(replies), 2)
-        self.assertEqual(replies[0]["result"]["serverInfo"]["version"], "0.6.2")
+        self.assertEqual(replies[0]["result"]["serverInfo"]["version"], "0.7.0")
         self.assertEqual({item["name"] for item in replies[1]["result"]["tools"]},
                          {"daxqo_submit", "daxqo_status", "daxqo_continue", "daxqo_stop"})
         tools = {item["name"]: item for item in replies[1]["result"]["tools"]}

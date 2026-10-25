@@ -2,6 +2,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
@@ -39,6 +43,8 @@
             </intent-filter>
         </activity>
         <activity android:name=".ControlActivity" android:exported="false" />
+        <activity android:name=".SmsSettingsActivity" android:exported="false" />
+        <receiver android:name=".SmsResultReceiver" android:exported="false" />
         <activity android:name=".WakeActivity" android:exported="false"
             android:taskAffinity=""
             android:excludeFromRecents="true"

@@ -198,7 +198,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         String actual = foregroundPackage();
         if (!expected.isEmpty() && !expected.equals(actual)) { callback.done(failure(id, "foreground_changed", "前台应用已变化，请重新读取屏幕")); return; }
         boolean readOnly = DeviceState.isReadOnly(action);
-        if (!readOnly && ControlActivity.visible) { callback.done(failure(id, "control_ui_local_only", "本机控制页只接受你亲自操作，请返回目标应用后重试")); return; }
+        if (!readOnly && (ControlActivity.visible || SmsSettingsActivity.visible)) { callback.done(failure(id, "control_ui_local_only", "本机控制与短信授权页只接受你亲自操作，请返回目标应用后重试")); return; }
         if (!readOnly && ownerConfirmationUi()) { callback.done(failure(id, "owner_confirmation_ui", "当前是你确认操作的界面，手机工具不能自行点击批准；请由你确认后继续")); return; }
         if (!readOnly && ("tap".equals(action) || "long_press".equals(action) || "swipe".equals(action) || "back".equals(action) || "home".equals(action))) {
             JSONObject blocked = authorizeMutation(id, action, args, sensitiveReason());

@@ -26,7 +26,7 @@ from urllib.request import (HTTPRedirectHandler, ProxyHandler, Request,
                             build_opener)
 
 VERSION = "0.163.0"
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.7.0"
 REGISTRY = "registry.npmjs.org"
 BACKEND_PORT = 18880
 FLAT_FILES = (
@@ -38,6 +38,7 @@ FLAT_FILES = (
     "android_mcp_server.py", "test_android_mcp.py", "phone_backends.py", "test_phone_backends.py",
     "remote_protocol.py", "test_remote_protocol.py", "email_control.py", "test_email_control.py",
     "test_remote_email_mcp.py", "agent_context.py", "test_agent_context.py", "assistant_mcp_server.py", "test_assistant_mcp.py",
+    "sms_control.py", "test_sms_control.py",
 )
 SCRIPT_FLAT_FILES = ("remote_email_mcp.py", "assistant_client.py", "test_assistant_client.py", "install_assistant_skill.py", "test_install_assistant_skill.py")
 SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
