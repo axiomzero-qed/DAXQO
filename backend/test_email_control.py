@@ -754,19 +754,28 @@ class MailControlTests(unittest.TestCase):
 @unittest.skipIf(email_control.dkim is None or (rsa is None and OPENSSL is None),
                  "DKIM unavailable and neither cryptography nor openssl can create a test key")
 class PlainEmailAuthenticationTests(unittest.TestCase):
+    PROVIDER_DOMAINS = ("qq.com", "foxmail.com", "163.com", "126.com", "yeah.net")
+
     @classmethod
     def setUpClass(cls):
-        if rsa is not None:
-            cls.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
-                serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption())
-            cls._key_object = serialization.load_pem_private_key(cls.private_key, password=None)
-            cls.public_key = cls._key_object.public_key().public_bytes(
-                serialization.Encoding.DER, serialization.PublicFormat.PKCS1)
-        else:
-            cls.private_key = subprocess.run([OPENSSL, "genrsa", "2048"], capture_output=True, check=True).stdout
-            cls.public_key = subprocess.run([OPENSSL, "rsa", "-pubout", "-outform", "DER"],
-                                            input=cls.private_key, capture_output=True, check=True).stdout
+        cls._keypairs = {}
         cls.now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+
+    @classmethod
+    def _keypair(cls, bits):
+        if bits not in cls._keypairs:
+            if rsa is not None:
+                private_key = rsa.generate_private_key(public_exponent=65537, key_size=bits).private_bytes(
+                    serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption())
+                key_object = serialization.load_pem_private_key(private_key, password=None)
+                public_key = key_object.public_key().public_bytes(
+                    serialization.Encoding.DER, serialization.PublicFormat.PKCS1)
+            else:
+                private_key = subprocess.run([OPENSSL, "genrsa", str(bits)], capture_output=True, check=True).stdout
+                public_key = subprocess.run([OPENSSL, "rsa", "-pubout", "-outform", "DER"],
+                                            input=private_key, capture_output=True, check=True).stdout
+            cls._keypairs[bits] = (private_key, public_key)
+        return cls._keypairs[bits]
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -780,11 +789,19 @@ class PlainEmailAuthenticationTests(unittest.TestCase):
         created = self.service.create_contact({"email": "owner@gmail.com"})
         self.contact = created["contact"]
         self.contact_secret = created["pairingSecret"]
+        self._fixture_public_keys = {}
         FakeSMTP.instances.clear()
 
     def dnsfunc(self, name, timeout=5):
-        self.assertEqual(name.lower(), b"fixture._domainkey.gmail.com.")
-        return b"v=DKIM1; k=rsa; p=" + base64.b64encode(self.public_key)
+        query = name.lower().rstrip(b".")
+        try:
+            selector, domain = query.split(b"._domainkey.", 1)
+        except ValueError:
+            self.fail("unexpected DKIM DNS query shape")
+        public_key = self._fixture_public_keys.get((selector.decode("ascii"), domain.decode("ascii")))
+        if public_key is None:
+            self.fail(f"no fixture key registered for {selector!r}._domainkey.{domain!r}")
+        return b"v=DKIM1; k=rsa; p=" + base64.b64encode(public_key)
 
     def commands(self):
         with self.harness.store.lock:
@@ -799,7 +816,28 @@ class PlainEmailAuthenticationTests(unittest.TestCase):
 
     def signed_email(self, *, body="please process this fixture", subject="Fixture request", sender="owner@gmail.com",
                      receiver="device@example.net", date=None, include_headers=None, length=False, body_type="plain",
-                     attachment=False):
+                     attachment=False, signing_domain=None, key_bits=2048, private_key=None, timestamp=None,
+                     signed_headers=None, selector="fixture", signature_algorithm=b"rsa-sha256",
+                     transfer_encoding="quoted-printable", html_body="<p>HTML fixture</p>"):
+        if signed_headers is not None:
+            if include_headers is not None:
+                raise ValueError("Use either include_headers or signed_headers")
+            include_headers = signed_headers
+        if signing_domain is None:
+            signing_domain = sender.rsplit("@", 1)[-1].lower()
+        if private_key is None:
+            private_key, public_key = self._keypair(key_bits)
+        else:
+            if isinstance(private_key, str):
+                private_key = private_key.encode("ascii")
+            if rsa is not None:
+                key_object = serialization.load_pem_private_key(private_key, password=None)
+                public_key = key_object.public_key().public_bytes(
+                    serialization.Encoding.DER, serialization.PublicFormat.PKCS1)
+            else:
+                public_key = subprocess.run([OPENSSL, "rsa", "-pubout", "-outform", "DER"],
+                                            input=private_key, capture_output=True, check=True).stdout
+        self._fixture_public_keys[(selector, signing_domain.lower())] = public_key
         message = EmailMessage()
         message["From"] = sender
         message["To"] = receiver
@@ -807,19 +845,48 @@ class PlainEmailAuthenticationTests(unittest.TestCase):
         message["Date"] = format_datetime(date or self.now)
         message["Message-ID"] = f"<{uuid.uuid4()}@gmail.com>"
         if body_type == "plain":
-            message.set_content(body, charset="utf-8", cte="quoted-printable")
+            message.set_content(body, charset="utf-8", cte=transfer_encoding)
         elif body_type == "html":
-            message.set_content(body, subtype="html", charset="utf-8", cte="quoted-printable")
+            message.set_content(body, subtype="html", charset="utf-8", cte=transfer_encoding)
+        elif body_type == "multipart":
+            message.set_content(body, charset="utf-8", cte=transfer_encoding)
+            message.add_alternative(html_body, subtype="html", charset="utf-8", cte=transfer_encoding)
         elif body_type == "empty-multipart":
             message.set_type("multipart/alternative")
         if attachment:
             message.add_attachment(b"fixture attachment", maintype="application", subtype="octet-stream", filename="fixture.bin")
         raw = message.as_bytes(policy=policy.SMTP)
-        headers = include_headers or [b"from", b"to", b"subject", b"date", b"message-id",
+        headers = include_headers or ([b"from", b"to", b"subject", b"date", b"message-id",
                                       b"content-type", b"mime-version", b"content-transfer-encoding"]
-        signature = email_control.dkim.sign(raw, b"fixture", b"gmail.com", self.private_key,
-                                            include_headers=headers, length=length)
+                                     if signing_domain.lower() == "gmail.com" else
+                                     [b"from", b"to", b"subject", b"date"])
+        signer = lambda: email_control.dkim.sign(raw, selector.encode("ascii"), signing_domain.encode("ascii"), private_key,
+                                                  include_headers=headers, length=length,
+                                                  signature_algorithm=signature_algorithm)
+        if timestamp is None:
+            signature = signer()
+        else:
+            signing_time = int(timestamp.timestamp()) if hasattr(timestamp, "timestamp") else int(timestamp)
+            with patch("email_control.dkim.time.time", return_value=signing_time):
+                signature = signer()
         return signature + raw
+
+    @staticmethod
+    def replace_outer_header(raw, name, value):
+        header, separator, body = raw.partition(b"\r\n\r\n")
+        if not separator:
+            raise AssertionError("fixture message has no header/body separator")
+        target = name.encode("ascii").lower() + b":"
+        lines = header.split(b"\r\n")
+        matches = [index for index, line in enumerate(lines) if line.lower().startswith(target)]
+        if len(matches) > 1:
+            raise AssertionError(f"expected at most one outer {name} header, got {len(matches)}")
+        replacement = name.encode("ascii") + b": " + value.encode("ascii")
+        if matches:
+            lines[matches[0]] = replacement
+        else:
+            lines.append(replacement)
+        return b"\r\n".join(lines) + separator + body
 
     def verify_fixture(self, raw, *, sender="owner@gmail.com", since=None, now=None):
         start = since or (self.now - dt.timedelta(days=2)).isoformat()
@@ -837,6 +904,241 @@ class PlainEmailAuthenticationTests(unittest.TestCase):
         self.assertIn("邮件主题：Check the report", result["prompt"])
         self.assertIn("Please review the local fixture.", result["prompt"])
         self.assertTrue(result["messageId"].startswith("<"))
+
+    def test_gmail_fixture_keeps_2048_bit_rsa_sha256_and_legacy_signed_headers(self):
+        raw = self.signed_email()
+        parsed = BytesParser(policy=policy.default).parsebytes(raw)
+        fields = email_control.dkim.parse_tag_value(str(parsed["DKIM-Signature"]).encode("ascii"))
+        signed = {header.strip().lower() for header in fields[b"h"].split(b":")}
+        self.assertEqual(fields[b"d"], b"gmail.com")
+        self.assertEqual(fields[b"a"], b"rsa-sha256")
+        self.assertNotIn(b"l", fields)
+        self.assertEqual(signed, {b"from", b"to", b"subject", b"date", b"message-id",
+                                  b"content-type", b"mime-version", b"content-transfer-encoding"})
+        if rsa is not None:
+            private, _ = self._keypair(2048)
+            self.assertEqual(serialization.load_pem_private_key(private, password=None).key_size, 2048)
+        with self.assertRaises(ValueError):
+            self.verify_fixture(self.signed_email(key_bits=1024))
+
+    def test_provider_fixtures_use_exact_domains_1024_bit_sha256_and_minimum_headers(self):
+        for domain in self.PROVIDER_DOMAINS:
+            with self.subTest(domain=domain):
+                sender = "owner@" + domain
+                raw = self.signed_email(sender=sender, signing_domain=domain, key_bits=1024)
+                self.assertTrue(email_control.dkim.DKIM(raw, minkey=1024).verify(dnsfunc=self.dnsfunc))
+                parsed = BytesParser(policy=policy.default).parsebytes(raw)
+                fields = email_control.dkim.parse_tag_value(str(parsed["DKIM-Signature"]).encode("ascii"))
+                self.assertEqual(fields[b"d"], domain.encode("ascii"))
+                self.assertEqual(fields[b"a"], b"rsa-sha256")
+                self.assertNotIn(b"l", fields)
+                signed = {header.strip().lower() for header in fields[b"h"].split(b":")}
+                self.assertTrue({b"from", b"to", b"subject", b"date"}.issubset(signed))
+
+    def test_supported_provider_signatures_create_one_task_and_reply_to_registered_sender(self):
+        self.enable_plain()
+        start = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        verifier = lambda *args, **kwargs: _verify_plain_email(*args, dnsfunc=self.dnsfunc, **kwargs)
+        with patch("email_control._verify_plain_email", side_effect=verifier), \
+             patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            for index, domain in enumerate(self.PROVIDER_DOMAINS, 1):
+                sender = "owner@" + domain
+                contact = self.service.create_contact({"email": sender})["contact"]
+                raw = self.signed_email(sender=sender, signing_domain=domain, key_bits=1024,
+                    subject=f"Fixture {domain}", body="请检查这个普通任务。",
+                    date=start + dt.timedelta(seconds=index))
+                self.service._process_plain_email(raw, {**contact, "plain_since": None}, "provider-" + domain)
+                self.service._process_plain_email(raw, {**contact, "plain_since": None}, "provider-duplicate-" + domain)
+
+        self.assertEqual(len(self.harness.start_calls), len(self.PROVIDER_DOMAINS))
+        self.assertEqual(len(self.commands()), len(self.PROVIDER_DOMAINS))
+        for call, domain in zip(self.harness.start_calls, self.PROVIDER_DOMAINS):
+            self.assertTrue(call["prompt"].endswith(f"邮件主题：Fixture {domain}\n\n请检查这个普通任务。"))
+        self.assertEqual(len(FakeSMTP.instances), len(self.PROVIDER_DOMAINS))
+        self.assertEqual([smtp.sent[0]["To"] for smtp in FakeSMTP.instances],
+                         ["owner@" + domain for domain in self.PROVIDER_DOMAINS])
+        self.assertEqual([row["ack_status"] for row in self.commands()], ["sent"] * len(self.PROVIDER_DOMAINS))
+
+    def test_valid_provider_signatures_from_unknown_or_disabled_contacts_are_not_fetched(self):
+        self.enable_plain()
+        disabled = self.service.create_contact({"email": "owner@163.com"})["contact"]
+        self.service.contact_action(disabled["id"], "toggle", enabled=False)
+        unknown_sender = "stranger@qq.com"
+        disabled_mail = self.signed_email(sender=disabled["email"], signing_domain="163.com", key_bits=1024)
+        unknown_mail = self.signed_email(sender=unknown_sender, signing_domain="qq.com", key_bits=1024)
+        imap = FakeMailboxIMAP({1: unknown_mail, 2: disabled_mail})
+        with patch.object(self.service, "_connections", return_value=imap):
+            self.service.poll_once()
+        self.assertEqual(imap.full_fetches, 0)
+        self.assertEqual(self.harness.start_calls, [])
+        self.assertEqual(self.commands(), [])
+
+    def test_domestic_provider_cutover_blocks_old_mail_and_survives_service_restart(self):
+        # Model an installation whose global plain-mail feature predates the
+        # provider rollout, with a QQ contact that already existed then.
+        activated = self.now - dt.timedelta(days=2)
+        cutover = self.now - dt.timedelta(minutes=30)
+        with patch("email_control._stamp", return_value=activated.strftime("%Y-%m-%dT%H:%M:%SZ")):
+            self.enable_plain()
+        contact = self.service.create_contact({"email": "owner@qq.com"})["contact"]
+        with self.harness.store.lock, self.harness.store.db:
+            self.harness.store.db.execute("UPDATE mail_contacts SET created_at=? WHERE id=?",
+                                          (activated.strftime("%Y-%m-%dT%H:%M:%SZ"), contact["id"]))
+            self.harness.store.db.execute("UPDATE mail_features SET enabled_at=? WHERE name='qq-netease-plain-v1'",
+                                          (cutover.strftime("%Y-%m-%dT%H:%M:%SZ"),))
+        self.service._domestic_since = cutover.strftime("%Y-%m-%dT%H:%M:%SZ")
+        legacy = self.signed_email(sender="owner@qq.com", signing_domain="qq.com", key_bits=1024,
+            signed_headers=[b"from", b"to", b"subject", b"date"], date=cutover - dt.timedelta(minutes=5),
+            subject="Before domestic rollout")
+        post_cutover = self.signed_email(sender="owner@qq.com", signing_domain="qq.com", key_bits=1024,
+            signed_headers=[b"from", b"to", b"subject", b"date"], date=cutover + dt.timedelta(seconds=1),
+            subject="After domestic rollout")
+        verifier = lambda *args, **kwargs: _verify_plain_email(*args, dnsfunc=self.dnsfunc, **kwargs)
+        with patch("email_control._verify_plain_email", side_effect=verifier), \
+             patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.assertFalse(self.service._process_plain_email(legacy, contact, "legacy-cutover-mail"))
+            self.assertEqual(self.harness.start_calls, [])
+            self.assertTrue(self.service._process_plain_email(post_cutover, contact, "new-cutover-mail"))
+        self.assertEqual(len(self.harness.start_calls), 1)
+
+        later = self.now + dt.timedelta(days=10)
+        with patch("email_control._stamp", return_value=later.strftime("%Y-%m-%dT%H:%M:%SZ")):
+            restarted = MailControlService(self.harness)
+        self.assertEqual(restarted._domestic_since, cutover.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        with patch("email_control._verify_plain_email", side_effect=verifier), \
+             patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.assertFalse(restarted._process_plain_email(post_cutover, contact, "replayed-after-restart"))
+        self.assertEqual(len(self.harness.start_calls), 1)
+        self.assertEqual(len(self.commands()), 1)
+
+    def test_provider_signature_requires_exact_domain_and_signed_identity_fields(self):
+        sender = "owner@qq.com"
+        signed_required = [b"from", b"to", b"subject", b"date"]
+        valid = self.signed_email(sender=sender, signing_domain="qq.com", key_bits=1024,
+                                  signed_headers=signed_required)
+        cases = [
+            ("forged From", valid.replace(b"owner@qq.com", b"attacker@qq.com", 1), sender),
+            ("tampered signed To", self.replace_outer_header(valid, "To", "other@example.net"), sender),
+            ("allowed but mismatched d", self.signed_email(sender=sender, signing_domain="foxmail.com",
+                key_bits=1024, signed_headers=signed_required), sender),
+            ("subdomain d", self.signed_email(sender=sender, signing_domain="mail.qq.com",
+                key_bits=1024, signed_headers=signed_required), sender),
+            ("unsigned To", self.signed_email(sender=sender, signing_domain="qq.com", key_bits=1024,
+                signed_headers=[b"from", b"subject", b"date"]), sender),
+            ("unsigned Subject", self.signed_email(sender=sender, signing_domain="qq.com", key_bits=1024,
+                signed_headers=[b"from", b"to", b"date"]), sender),
+            ("tampered signed Subject", self.replace_outer_header(valid, "Subject", "Changed subject"), sender),
+            ("tampered signed body", valid.replace(b"please process this fixture", b"please PROCESS this fixture"), sender),
+            ("SHA-1", self.signed_email(sender=sender, signing_domain="qq.com", key_bits=1024,
+                signed_headers=signed_required, signature_algorithm=b"rsa-sha1"), sender),
+            ("body length tag", self.signed_email(sender=sender, signing_domain="qq.com", key_bits=1024,
+                signed_headers=signed_required, length=True), sender),
+        ]
+        unsigned = EmailMessage()
+        unsigned["From"], unsigned["To"], unsigned["Subject"] = sender, "device@example.net", "Unsigned"
+        unsigned["Date"] = format_datetime(self.now)
+        unsigned.set_content("unsigned body")
+        cases.append(("missing signature", unsigned.as_bytes(policy=policy.SMTP), sender))
+        for label, raw, expected_sender in cases:
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                self.verify_fixture(raw, sender=expected_sender)
+
+    def test_unsigned_message_id_changes_do_not_change_qq_replay_nonce(self):
+        self.enable_plain()
+        sender = "owner@qq.com"
+        contact = self.service.create_contact({"email": sender})["contact"]
+        since = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        raw = self.signed_email(sender=sender, signing_domain="qq.com", key_bits=1024,
+            signed_headers=[b"from", b"to", b"subject", b"date"],
+            date=since + dt.timedelta(seconds=1))
+        original_id = BytesParser(policy=policy.default).parsebytes(raw)["Message-ID"]
+        changed = raw.replace(str(original_id).encode("ascii"), b"<changed-mid@example.invalid>", 1)
+        first = self.verify_fixture(raw, sender=sender)
+        second = self.verify_fixture(changed, sender=sender)
+        self.assertNotEqual(first["messageId"], second["messageId"])
+        self.assertEqual(first["nonce"], second["nonce"])
+
+        verifier = lambda *args, **kwargs: _verify_plain_email(*args, dnsfunc=self.dnsfunc, **kwargs)
+        with patch("email_control._verify_plain_email", side_effect=verifier), \
+             patch("email_control.smtplib.SMTP_SSL", FakeSMTP):
+            self.service._process_plain_email(raw, {**contact, "plain_since": None}, "qq-original")
+            self.service._process_plain_email(changed, {**contact, "plain_since": None}, "qq-mid-changed")
+        self.assertEqual(len(self.harness.start_calls), 1)
+
+    def test_provider_message_id_dedup_and_signature_fingerprint_block_replays(self):
+        self.enable_plain()
+        sender = "owner@qq.com"
+        contact = self.service.create_contact({"email": sender})["contact"]
+        since = dt.datetime.fromisoformat(self.service._config["plainEmailSince"].replace("Z", "+00:00"))
+        raw = self.signed_email(sender=sender, signing_domain="qq.com", key_bits=1024,
+            signed_headers=[b"from", b"to", b"subject", b"date"], date=since + dt.timedelta(seconds=1))
+        original_id = BytesParser(policy=policy.default).parsebytes(raw)["Message-ID"]
+        changed_mid = raw.replace(str(original_id).encode("ascii"), b"<changed-mid@example.invalid>", 1)
+        verifier = lambda *args, **kwargs: _verify_plain_email(*args, dnsfunc=self.dnsfunc, **kwargs)
+        with patch.object(self.service, "_connections", return_value=FakeMailboxIMAP({1: raw})), \
+             patch("email_control.smtplib.SMTP_SSL", FakeSMTP), \
+             patch("email_control._verify_plain_email", side_effect=verifier):
+            self.service.poll_once()
+        self.assertEqual(len(self.harness.start_calls), 1)
+
+        repeated = FakeMailboxIMAP({2: raw})
+        with patch.object(self.service, "_connections", return_value=repeated):
+            self.service.poll_once()
+        self.assertEqual(repeated.full_fetches, 0, "contact_id + Message-ID header claim should skip known mail")
+
+        changed = FakeMailboxIMAP({3: changed_mid})
+        with patch.object(self.service, "_connections", return_value=changed), \
+             patch("email_control.smtplib.SMTP_SSL", FakeSMTP), \
+             patch("email_control._verify_plain_email", side_effect=verifier):
+            self.service.poll_once()
+        self.assertEqual(changed.full_fetches, 1, "changed unsigned Message-ID requires signature verification")
+        self.assertEqual(len(self.harness.start_calls), 1, "the same signed b= fingerprint must not replay")
+        self.assertEqual(len(self.commands()), 1)
+
+    def test_unsigned_outer_mime_headers_do_not_change_authenticated_provider_body(self):
+        sender = "owner@qq.com"
+        signed_headers = [b"from", b"to", b"subject", b"date"]
+        cases = (
+            ("quoted-printable", "plain", "请保留说明=并读取文件"),
+            ("base64", "plain", "请保留说明并读取文件"),
+            ("quoted-printable", "multipart", "多段正文中文任务"),
+        )
+        for encoding, body_type, body in cases:
+            with self.subTest(encoding=encoding, body_type=body_type):
+                raw = self.signed_email(sender=sender, signing_domain="qq.com", key_bits=1024,
+                    signed_headers=signed_headers, transfer_encoding=encoding, body_type=body_type,
+                    body=body, html_body="<p>HTML side text</p><script>not an instruction</script>")
+                baseline = self.verify_fixture(raw, sender=sender)
+                tampered = self.replace_outer_header(raw, "Content-Type", "application/octet-stream")
+                tampered = self.replace_outer_header(tampered, "Content-Transfer-Encoding", "base64")
+                tampered = self.replace_outer_header(tampered, "MIME-Version", "9.9")
+                parsed = self.verify_fixture(tampered, sender=sender)
+                self.assertEqual((parsed["action"], parsed["title"], parsed["prompt"], parsed["nonce"]),
+                                 (baseline["action"], baseline["title"], baseline["prompt"], baseline["nonce"]))
+                self.assertIn(body, parsed["prompt"])
+                self.assertNotIn("not an instruction", parsed["prompt"])
+
+        empty = self.signed_email(sender=sender, signing_domain="qq.com", key_bits=1024,
+            signed_headers=signed_headers, body="", subject="请检查下载目录")
+        title_only = self.verify_fixture(empty, sender=sender)
+        self.assertEqual(title_only["prompt"], "邮件主题：请检查下载目录")
+
+    def test_fresh_unsigned_date_cannot_refresh_stale_dkim_timestamp(self):
+        sender = "owner@163.com"
+        stale = self.now - dt.timedelta(hours=25)
+        raw = self.signed_email(sender=sender, signing_domain="163.com", key_bits=1024,
+            signed_headers=[b"from", b"to", b"subject"], date=self.now, timestamp=stale)
+        with self.assertRaises(ValueError):
+            self.verify_fixture(raw, sender=sender, since=(self.now - dt.timedelta(days=2)).isoformat())
+
+    def test_ununsigned_date_is_accepted_only_with_recent_dkim_timestamp(self):
+        sender = "owner@126.com"
+        signed_headers = [b"from", b"to", b"subject"]
+        recent = self.signed_email(sender=sender, signing_domain="126.com", key_bits=1024,
+            signed_headers=signed_headers, date=self.now, timestamp=self.now)
+        result = self.verify_fixture(recent, sender=sender,
+            since=(self.now - dt.timedelta(hours=2)).isoformat())
+        self.assertIn("please process this fixture", result["prompt"])
 
     def test_empty_body_falls_back_to_authenticated_subject_but_nonempty_body_wins(self):
         title = "请检查下载目录中的报告"
@@ -1081,7 +1383,7 @@ class PlainEmailAuthenticationTests(unittest.TestCase):
         self.assertEqual(len(FakeSMTP.instances), 1)
         ack = FakeSMTP.instances[0].sent[0]
         self.assertEqual(ack["To"], "owner@gmail.com")
-        self.assertIn("已验证你的 Gmail 身份", ack.get_content())
+        self.assertIn("已验证你的可信邮箱身份", ack.get_content())
         with self.harness.store.lock, self.harness.store.db:
             self.harness.store.db.execute("UPDATE tasks SET status='completed',result=? WHERE id='task_1'",
                                           ("Done " + self.contact_secret + " fixture-mail-password",))
