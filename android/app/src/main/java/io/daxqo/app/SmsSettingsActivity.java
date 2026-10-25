@@ -16,10 +16,13 @@ import org.json.JSONObject;
 
 /** Local, explicit permission and domestic-SIM selection screen. */
 public final class SmsSettingsActivity extends Activity {
+    static volatile boolean visible;
     private LinearLayout rows;
     private TextView summary;
     private SmsController sms;
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+    @Override protected void onStart() { super.onStart(); visible = true; }
+    @Override protected void onStop() { visible = false; super.onStop(); }
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         sms = new SmsController(this);
