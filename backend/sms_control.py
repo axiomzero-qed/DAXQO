@@ -19,6 +19,7 @@ MAX_QUERY = 50
 MAX_ENABLED_CONTACTS = 50
 MAX_REPLY_UTF16 = 70
 POLL_SECONDS = 4
+REPLY_CONFIRM_TIMEOUT_MS = 5 * 60 * 1000
 RESULT_PREFIX = "DAXQO/RESULT "
 
 
@@ -86,7 +87,7 @@ class SmsControlService:
 
     @staticmethod
     def _default_config() -> dict:
-        return {"enabled": False, "replyEnabled": True, "enabledSince": None, "subscriptionId": None}
+        return {"enabled": False, "replyEnabled": False, "enabledSince": None, "subscriptionId": None}
 
     def _read_config(self) -> dict:
         default = self._default_config()
@@ -433,6 +434,12 @@ class SmsControlService:
                 "SELECT * FROM sms_commands WHERE status='started' AND reply_status IN ('not_due','queued') ORDER BY rowid LIMIT 50")]
         for row in rows:
             if row["reply_status"] == "queued":
+                requested_at = _millis(row["replied_at"])
+                if not requested_at or int(time.time() * 1000) - requested_at >= REPLY_CONFIRM_TIMEOUT_MS:
+                    # A vendor confirmation dialog or carrier may never report back.
+                    # The SMS can still arrive later; do not turn this into a resend.
+                    self._mark_reply(row["id"], "unknown")
+                    continue
                 if not row["reply_id"]: self._mark_reply(row["id"], "unknown", replied=True); continue
                 try:
                     result = self.bridge.request("GET", "/api/sms/sends/" + row["reply_id"])

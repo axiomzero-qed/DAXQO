@@ -207,8 +207,8 @@ class SmsControlTests(unittest.TestCase):
         with self.harness.store.db:
             self.harness.store.db.execute("INSERT INTO tasks(id,title,prompt,status,created_at,updated_at,result) VALUES(?,?,?,?,?,?,?)",
                 (task_id, "fixture", "fixture", "completed", stamp, stamp, "完成了电话里的任务，拨打 10086"))
-            self.harness.store.db.execute("INSERT INTO sms_commands(id,subscription_id,native_id,contact_id,sender,received_at,status,task_id,reply_status) VALUES(?,?,?,?,?,?,?,?,?)",
-                ("cmd-fixture", 7, "21", contact["id"], sender, stamp, "started", task_id, reply_status))
+            self.harness.store.db.execute("INSERT INTO sms_commands(id,subscription_id,native_id,contact_id,sender,received_at,status,task_id,reply_status,replied_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("cmd-fixture", 7, "21", contact["id"], sender, stamp, "started", task_id, reply_status, stamp if reply_status == "queued" else None))
         return contact
 
     def test_terminal_reply_is_short_fixed_to_original_registered_sender(self):
@@ -250,6 +250,16 @@ class SmsControlTests(unittest.TestCase):
         self.assertFalse(any(path == "/api/sms/send" for _, path, _ in self.bridge.calls))
         row = self.harness.store.db.execute("SELECT reply_status FROM sms_commands WHERE id='cmd-fixture'").fetchone()
         self.assertEqual(row[0], "unknown")
+
+    def test_unconfirmed_vendor_send_times_out_without_resending(self):
+        self.enable(); self._started_command(reply_status="queued")
+        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=6)).isoformat().replace("+00:00", "Z")
+        self.harness.store.db.execute("UPDATE sms_commands SET reply_id='send-1',replied_at=? WHERE id='cmd-fixture'", (old,))
+        self.sms._poll_reply_statuses(self.sms._config, {}, self.sms._generation)
+        self.sms._poll_reply_statuses(self.sms._config, {}, self.sms._generation)
+        self.assertFalse(any(path == "/api/sms/send" or path.startswith("/api/sms/sends/") for _, path, _ in self.bridge.calls))
+        row = self.harness.store.db.execute("SELECT reply_status,replied_at FROM sms_commands WHERE id='cmd-fixture'").fetchone()
+        self.assertEqual(tuple(row), ("unknown", old))
 
     def test_restart_converts_inflight_task_and_send_to_uncertain_without_replay(self):
         contact = self.contact(); stamp = server.now()
