@@ -176,13 +176,15 @@ class TaskWorkspaceTests(unittest.TestCase):
 
         self.engine.request = recording_request
         first = self.harness.start_task({"prompt": "create first local result"})
+        # This legacy fake uses one fixed thread ID. Finish its first turn
+        # before creating the second, then exercise concurrent file writes below.
+        self._wait_completed(first["id"])
         second = self.harness.start_task({"prompt": "create second local result"})
         self.assertNotEqual(first["id"], second["id"])
         self.assertEqual(first["workspacePath"], "tasks/" + first["id"])
         self.assertEqual(second["workspacePath"], "tasks/" + second["id"])
         self.assertNotEqual(self.harness.task_workspace(self.harness.store.row(first["id"])),
                             self.harness.task_workspace(self.harness.store.row(second["id"])))
-        self._wait_completed(first["id"])
         self._wait_completed(second["id"])
 
         first_root = self.harness.task_workspace(self.harness.store.row(first["id"]))

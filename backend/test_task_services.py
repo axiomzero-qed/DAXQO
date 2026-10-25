@@ -228,7 +228,7 @@ class PrepareBodyFixtureTests(TaskServicesFixtureCase):
         self.assertEqual(original["text"], "请查看附件")
         self.assertEqual(first, second)
         self.assertEqual(first["text"].count("本次导入的附件"), 1)
-        self.assertIn(json.dumps(str(target), ensure_ascii=False), first["text"])
+        self.assertIn(json.dumps(str(target.resolve(strict=True)), ensure_ascii=False), first["text"])
         self.assertEqual(first["_displayText"], "请查看附件")
         self.assertEqual(first["_attachments"][0]["path"], relative)
         self.assertEqual(target.read_bytes(), b"task-local attachment")
