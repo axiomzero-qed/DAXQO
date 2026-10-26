@@ -91,10 +91,10 @@ try {
     if ($PSBoundParameters.ContainsKey('Platform')) {
         $buildTasks += "-Pplatform=$Platform"
     } elseif ($Xm) { $buildTasks += '-Pxm=true' }
-    $buildTasks += $(if ($Release) { 'assembleRelease' } else { 'assembleDebug' })
-    if ($Lint) { $buildTasks += $(if ($Release) { 'lintRelease' } else { 'lintDebug' }) }
+    $buildTasks += $(if ($Release) { ':app:assembleRelease' } else { ':app:assembleDebug' })
+    if ($Lint) { $buildTasks += $(if ($Release) { ':app:lintRelease' } else { ':app:lintDebug' }) }
     & (Join-Path $mappedTools 'gradle-8.10.2\bin\gradle.bat') --no-daemon @buildTasks
-    if ($LASTEXITCODE -ne 0) { throw 'Android debug APK build failed.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Android APK build failed.' }
 } finally {
     Pop-Location
     & subst.exe $drive /D | Out-Null

@@ -137,6 +137,26 @@ final class WechatGateAcceptance {
         remote = action("tap", new JSONObject().put("x", 900).put("y", 1800));
         check("risk_dialog_remote_write_denied", !remote.optBoolean("ok") && !DeviceState.wechatAllowed(target));
         dialog = automation().getRootInActiveWindow();
+        AccessibilityNodeInfo acknowledgement = byClass(dialog, "android.widget.CheckBox");
+        check("owner_can_acknowledge_risk", acknowledgement != null && acknowledgement.performAction(AccessibilityNodeInfo.ACTION_CLICK));
+        if (acknowledgement != null) acknowledgement.recycle(); dialog.recycle();
+        test.waitForIdleSync();
+        dialog = automation().getRootInActiveWindow();
+        yes = byId(dialog, "android:id/button1");
+        check("acknowledgement_alone_keeps_off", !DeviceState.wechatAllowed(target));
+        check("acknowledgement_enables_confirmation", yes != null && yes.isEnabled());
+        check("owner_can_confirm_enable", yes != null && yes.performAction(AccessibilityNodeInfo.ACTION_CLICK));
+        if (yes != null) yes.recycle(); dialog.recycle();
+        test.waitForIdleSync();
+        check("owner_confirmation_persisted", DeviceState.wechatAllowed(target));
+        test.runOnMainSync(() -> setting[0].performClick());
+        check("owner_switch_disables", !DeviceState.wechatAllowed(target));
+        test.runOnMainSync(() -> setting[0].performClick());
+        SystemClock.sleep(300);
+        dialog = automation().getRootInActiveWindow();
+        yes = byId(dialog, "android:id/button1");
+        check("each_enable_needs_fresh_acknowledgement", yes != null && !yes.isEnabled());
+        if (yes != null) yes.recycle();
         AccessibilityNodeInfo cancel = byId(dialog, "android:id/button2");
         check("cancel_warning", cancel != null && cancel.performAction(AccessibilityNodeInfo.ACTION_CLICK));
         if (cancel != null) cancel.recycle(); dialog.recycle();
@@ -210,4 +230,13 @@ final class WechatGateAcceptance {
     }
     private static boolean hasText(AccessibilityNodeInfo root, String text) { List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(text); boolean found = !nodes.isEmpty(); for (AccessibilityNodeInfo node : nodes) node.recycle(); return found; }
     private static AccessibilityNodeInfo byId(AccessibilityNodeInfo root, String id) { List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId(id); if (nodes.isEmpty()) return null; AccessibilityNodeInfo first = nodes.remove(0); for (AccessibilityNodeInfo node : nodes) node.recycle(); return first; }
+    private static AccessibilityNodeInfo byClass(AccessibilityNodeInfo root, String className) {
+        if (className.contentEquals(root.getClassName())) return AccessibilityNodeInfo.obtain(root);
+        for (int i = 0; i < root.getChildCount(); i++) {
+            AccessibilityNodeInfo child = root.getChild(i);
+            if (child != null) try { AccessibilityNodeInfo found = byClass(child, className); if (found != null) return found; }
+            finally { child.recycle(); }
+        }
+        return null;
+    }
 }

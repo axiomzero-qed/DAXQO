@@ -6,9 +6,9 @@
 
 ## V1.0.1 更新 / V1.0.1 update
 
-V1.0.1 默认关闭微信操作。只有用户在手机控制页阅读封号及永久封号风险并勾选确认后才能开启；full 模式、短信、邮件和任务都不能替用户启用。具体门禁范围与限制见 [V1.0.1 说明](docs/V1.0.1.md)。验收记录仍待补充。发布 APK 预期路径：`dist/v1.0.1/DAXQO-1.0.1-arm64.apk`（体积和 SHA-256 待最终构建）。V0.7 的既有能力继续保留。
+V1.0.1 保留 V0.7 能力，微信操作默认关闭；必须由用户在手机控制页阅读封号及永久封号风险并勾选确认后才能开启，full 模式、短信、邮件和任务均不能代为授权。Neo 正式 release 验收通过（48 项 instrumentation、13 个真实微信拒绝请求及浮窗跨应用负测）；未操作真实账号，未发送消息。APK [DAXQO-1.0.1-arm64.apk](dist/v1.0.1/DAXQO-1.0.1-arm64.apk)：versionCode 101、versionName 1.0.1、non-debuggable、525,144,012 bytes，SHA-256 `0fe08bf4e1020b89715091849b4fd98ae94f435cda843c32074b4698f71c8581`。本次未重发 SMS/email、未碰小米，也未重跑云模型全闭环。门禁边界及验收细节见 [V1.0.1 说明](docs/V1.0.1.md)；证据在 `dist/v1.0.1/acceptance`。
 
-V1.0.1 keeps WeChat operation off by default. A user must read the account-ban and permanent-ban risks on the phone control page and explicitly confirm before enabling it; full mode, SMS, email, and tasks cannot enable it. See the [V1.0.1 notes](docs/V1.0.1.md) for the gate's scope and limits. Acceptance results are pending. Expected APK path: `dist/v1.0.1/DAXQO-1.0.1-arm64.apk` (size and SHA-256 pending final build). Existing V0.7 capabilities remain available.
+V1.0.1 retains V0.7 capabilities and keeps WeChat operation off by default. The user must read the account-ban and permanent-ban risks on the phone control page and confirm; full mode, SMS, email, and tasks cannot authorize it. Neo release acceptance passed (48 instrumentation checks, 13 denied real-WeChat requests, and a cross-app floating-window negative check); no real account was operated and no message was sent. APK [DAXQO-1.0.1-arm64.apk](dist/v1.0.1/DAXQO-1.0.1-arm64.apk): versionCode 101, versionName 1.0.1, non-debuggable, 525,144,012 bytes, SHA-256 `0fe08bf4e1020b89715091849b4fd98ae94f435cda843c32074b4698f71c8581`. No SMS/email was resent, Xiaomi was untouched, and the cloud-model end-to-end flow was not rerun. See [V1.0.1 notes](docs/V1.0.1.md) for boundaries and results; evidence is under `dist/v1.0.1/acceptance`.
 
 
 ## V1.0 单 APK 离线运行环境 / V1.0 single-APK offline runtime
