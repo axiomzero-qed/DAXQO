@@ -13,4 +13,4 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = 'DAXQO'
-include ':app'
+include ':app', ':wechat-policy-fixture'

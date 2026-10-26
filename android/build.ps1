@@ -1,4 +1,4 @@
-param([switch]$InstallTools, [switch]$Lint, [switch]$Xm, [ValidateSet('standard','xm')][string]$Platform)
+param([switch]$InstallTools, [switch]$Lint, [switch]$Xm, [switch]$Release, [ValidateSet('standard','xm')][string]$Platform)
 $ErrorActionPreference = 'Stop'
 if ($PSBoundParameters.ContainsKey('Platform') -and $Xm -and $Platform -ne 'xm') {
     throw 'Conflicting -Xm and -Platform values.'
@@ -24,8 +24,8 @@ if ($InstallTools -or !(Test-Path (Join-Path $jdkDir 'bin\javac.exe')) -or !(Tes
 
     if (!(Test-Path (Join-Path $jdkDir 'bin\javac.exe'))) {
         $api = 'https://api.adoptium.net/v3/assets/latest/17/hotspot?architecture=x64&image_type=jdk&os=windows&vendor=eclipse'
-        $release = (Invoke-RestMethod -Uri $api)[0]
-        $pkg = $release.binary.package
+        $jdkReleaseMetadata = (Invoke-RestMethod -Uri $api)[0]
+        $pkg = $jdkReleaseMetadata.binary.package
         $archive = Join-Path $toolsDir 'temurin-jdk17.zip'
         Get-File $pkg.link $archive
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
@@ -91,12 +91,13 @@ try {
     if ($PSBoundParameters.ContainsKey('Platform')) {
         $buildTasks += "-Pplatform=$Platform"
     } elseif ($Xm) { $buildTasks += '-Pxm=true' }
-    $buildTasks += 'assembleDebug'
-    if ($Lint) { $buildTasks += 'lintDebug' }
+    $buildTasks += $(if ($Release) { 'assembleRelease' } else { 'assembleDebug' })
+    if ($Lint) { $buildTasks += $(if ($Release) { 'lintRelease' } else { 'lintDebug' }) }
     & (Join-Path $mappedTools 'gradle-8.10.2\bin\gradle.bat') --no-daemon @buildTasks
     if ($LASTEXITCODE -ne 0) { throw 'Android debug APK build failed.' }
 } finally {
     Pop-Location
     & subst.exe $drive /D | Out-Null
 }
-Write-Host "APK: $androidDir\app\build\outputs\apk\debug\app-debug.apk"
+if ($Release) { Write-Host "Unsigned APK: $androidDir\app\build\outputs\apk\release\app-release-unsigned.apk" }
+else { Write-Host "APK: $androidDir\app\build\outputs\apk\debug\app-debug.apk" }

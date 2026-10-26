@@ -29,6 +29,18 @@ public final class PlatformProfileRegression {
         check(xm.setupGuidance.contains("使用 Termux 承载运行环境时") && xm.setupGuidance.contains("Termux 也必须设为“无限制”")
                 && xm.setupGuidance.contains("保持会话") && xm.setupGuidance.contains("本机服务中断"),
                 "XM guidance includes the conditional Termux background prerequisite");
+        PlatformProfile standardOnXiaomi = PlatformProfile.forDevice("standard", "Xiaomi");
+        check("standard".equals(standardOnXiaomi.id) && standardOnXiaomi.setupGuidance.contains("澎湃")
+                && standardOnXiaomi.setupGuidance.contains("锁屏显示"), "Standard on Xiaomi uses Xiaomi permissions guidance");
+        PlatformProfile xmOnStepX = PlatformProfile.forDevice("xm", "StepX");
+        check("xm".equals(xmOnStepX.id) && !xmOnStepX.setupGuidance.contains("澎湃")
+                && !xmOnStepX.setupGuidance.contains("锁屏显示"), "XM identity on StepX omits Xiaomi permissions guidance");
+        PlatformProfile unknownOnStandard = PlatformProfile.forDevice("standard", "unknown");
+        check("standard".equals(unknownOnStandard.id) && unknownOnStandard.setupGuidance.equals(standard.setupGuidance),
+                "Unknown manufacturer falls back to build profile");
+        PlatformProfile emptyOnXm = PlatformProfile.forDevice("xm", " ");
+        check("xm".equals(emptyOnXm.id) && emptyOnXm.setupGuidance.equals(xm.setupGuidance),
+                "Empty manufacturer falls back to build profile");
         boolean rejected = false;
         try { PlatformProfile.fromId("other"); } catch (IllegalArgumentException expected) { rejected = true; }
         check(rejected, "unknown profile rejected");

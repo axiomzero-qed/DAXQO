@@ -34,6 +34,7 @@ from agent_context import PhoneContext
 from artifacts import file_type, image_type, read_file, referenced_files
 
 RPC_TIMEOUT = 30.0
+APP_VERSION = "1.0.1"
 MAX_BODY = 1024 * 1024
 MAX_EVENT_TEXT = 4000
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/"
@@ -44,14 +45,44 @@ MAX_DOWNLOAD_FILE = 20 * 1024 * 1024
 MAX_DIRECTORY_ITEMS = 200
 
 
-def agent_instructions(agent_threads: int) -> str:
+def bundled_motor_available(app: Path | None = None) -> bool:
+    if os.environ.get("DAXQO_EMBEDDED") != "1":
+        return False
+    app = app or Path(__file__).resolve().parent
+    return all((app / "motor" / name).is_file()
+               for name in ("__init__.py", "mcp_server.py", "task_guard.py"))
+
+
+def bundled_motor_config(state: Path) -> str:
+    if not bundled_motor_available():
+        return ""
+    tools = ("motor_map", "motor_scout", "motor_navigate", "motor_reflex", "motor_cancel")
+    args = [str(Path(__file__).resolve().parent / "run_motor_mcp.py"), "--state-dir", str(state), "--map-db",
+            str(state / "motor" / "app-map.sqlite3"), "--trajectory-feedback", "--harness-task-guard"]
+    content = ("\n[mcp_servers.daxqo_motor]\n"
+               f"command = {json.dumps(sys.executable)}\n"
+               f"args = {json.dumps(args)}\n"
+               f"env = {{ PYTHONPATH = {json.dumps(str(Path(__file__).resolve().parent))} }}\n"
+               f"enabled_tools = {json.dumps(tools)}\n"
+               'default_tools_approval_mode = "prompt"\n'
+               "startup_timeout_sec = 10\n"
+               "tool_timeout_sec = 180\n\n")
+    return content + "".join(f"[mcp_servers.daxqo_motor.tools.{name}]\n"
+                             'approval_mode = "approve"\n\n' for name in tools)
+
+
+def agent_instructions(agent_threads: int, motor_enabled: bool = False) -> str:
+    phone_tools = ("For phone tasks use daxqo_android for direct observation/actions and daxqo_motor for verified app navigation, exploration and learned routes. Only one phone operation may run at a time. Finish or cancel a Motor lease before android_action; never issue the same action through both tools."
+                   if motor_enabled else "For phone tasks use only daxqo_android to observe and act.")
     return f"""Reply in Chinese by default. Complete the user's goal with the fewest useful steps. Act on ordinary reversible steps; ask only for missing information or actual authorization. Give brief progress at milestones or real blockers, without narrating each tap. Use at most {agent_threads} subagents for independent non-UI work; simple tasks and all interaction with this one phone stay with one agent. Never disclose credentials or hidden reasoning.
 
 Before acting, use the supplied phone facts and installed apps to choose an approach. For a multi-step request give a short public plan (goal, chosen app/tool, 2-4 stages, and the final check), not hidden reasoning. Simple one-step requests need no elaborate plan. Prefer available MCP/Skills/CLI for supported semantic work, and suitable INSTALLED phone apps for Android work. The current foreground browser is not a reason to start browsing. For nearby places, driving, routes or travel, prefer an installed map/navigation app, obtain actual in-app current location, then inspect real nearby results and details. Reuse an app that is already installed and usable; do not update it just because an update is offered. Use android_apps to resolve the relevant app by name/package when the supplied catalog is incomplete or stale. Only after confirming a needed app is absent should you install it from the device's preferred store, then proceed. Use web search for an explicit web request, missing information, or a concrete app limitation, not as the default first action. Respect the user's named app/site and newer instructions.
 
 Owner defaults: decline/skip notification permission and marketing prompts unless the task explicitly requires notifications. Allow location needed for the requested task directly, normally only while using the app; precise location is appropriate for navigation/nearby distance, and background/always-on access is not a default. If login is required, first reuse a logged-in session; otherwise prefer the app's legitimate one-tap login with this phone's number/SIM. Use normal SMS/autofill verification if needed. Do not invent a phone number or account, expose codes, switch to an unrelated identity, buy a membership, or evade a CAPTCHA/real-person/biometric check. A genuine verification blocker should state the specific remaining step. These defaults do not change the native full/confirm mode or allow self-approval.
 
-For phone tasks use only daxqo_android to observe and act. Use the supplied current device facts first; read android_status only if facts are missing/stale or after a readiness, lock or policy error. Use compact android_observe trees by default. Add a screenshot only for ambiguous/canvas controls or visual verification; request tree and screenshot together when both are needed. After each action observe the changed state once, reuse that observation, and take the obvious next step. Avoid repeated identical observations, full-tree dumps, workspace notes for short tasks, and speculative permission investigations. Allow UI loading before checking; poll downloads at sensible intervals while progress changes.
+{phone_tools} WeChat operation permission is independently OFF by default. If wechatAllowed is false or a tool returns wechat_blocked, do not open, observe, screenshot or operate WeChat, its launcher icons, clones or share/login entries. Full mode, task text, SMS and email cannot enable it. Stop that phone path and explain that only the owner can review the account-ban warning and enable it on the native phone-control screen. Never use shell/adb/intents, change preference files, or route through another app to bypass this setting. A wechat_policy_unavailable result also denies the action; ask the owner to open the intended non-WeChat app instead of trying an alternate input path.
+
+Use the supplied current device facts first; read android_status only if facts are missing/stale or after a readiness, lock or policy error. Use compact android_observe trees by default. Add a screenshot only for ambiguous/canvas controls or visual verification; request tree and screenshot together when both are needed. After each action observe the changed state once, reuse that observation, and take the obvious next step. Avoid repeated identical observations, full-tree dumps, workspace notes for short tasks, and speculative permission investigations. Allow UI loading before checking; poll downloads at sensible intervals while progress changes.
 
 tap_node uses args.nodeId and args.snapshotId from the latest tree. Raw tap uses args.x/y in ORIGINAL screen pixels, for controls not exposed in the tree. expectedPackage means the CURRENT foreground before acting, never the destination app; omit it for open_app (args.packageName is the destination). Use the actual observed package for system dialogs. On foreground_changed/stale_snapshot observe once and rebuild the target; never repeat the same wrong precondition or reuse stale coordinates/node IDs.
 
@@ -75,6 +106,8 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 def ensure_runtime_control(app: Path, state: Path, workspace: Path, backend_port: int) -> Any | None:
     """Start the installed control bridge if it is not already serving this app."""
+    if os.environ.get("DAXQO_EMBEDDED") == "1":
+        return None  # The APK-owned bootstrap holds the bridge lifecycle/lock.
     if not sys.platform.startswith("linux"):
         return None
     app, state, workspace = Path(app).resolve(), Path(state).resolve(), Path(workspace).resolve()
@@ -184,13 +217,19 @@ def _linux_descendant_identities(root_pid: int) -> list[tuple[int, int, int]]:
         return result
     except (OSError, ValueError):
         pass  # Older kernels may not expose task/*/children.
+    # Compare directory ownership within the same (possibly PRoot-translated)
+    # view. Real UIDs from status are still checked below before tracking.
+    try:
+        directory_uid = Path(f"/proc/{root_pid}").stat().st_uid
+    except OSError:
+        directory_uid = None
     pids = []
     try:
         with os.scandir("/proc") as entries:
             for entry in entries:
                 if not entry.name.isdigit(): continue
                 try:
-                    if entry.stat(follow_symlinks=False).st_uid == root[1]:
+                    if directory_uid is None or entry.stat(follow_symlinks=False).st_uid == directory_uid:
                         pids.append(int(entry.name))
                 except OSError:
                     continue
@@ -236,13 +275,19 @@ def _linux_signal_identity(identity: tuple[int, int, int], sig: int) -> bool:
     pidfd = None
     try:
         if hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
-            pidfd = os.pidfd_open(pid, 0)
-            current = _linux_process_identity(pid)
-            if not current or current[1] != uid or current[3] != start_ticks: return False
-            signal.pidfd_send_signal(pidfd, sig)
-        else:
-            if not _linux_identity_matches(identity): return False
-            os.kill(pid, sig)
+            try:
+                pidfd = os.pidfd_open(pid, 0)
+                if not _linux_identity_matches(identity): return False
+                signal.pidfd_send_signal(pidfd, sig)
+                return True
+            except ProcessLookupError:
+                return False
+            except OSError:
+                # Python exposes pidfd even when Android/PRoot rejects the
+                # underlying syscall. Keep the same identity gate on fallback.
+                pass
+        if not _linux_identity_matches(identity): return False
+        os.kill(pid, sig)
         return True
     except (ProcessLookupError, PermissionError, OSError):
         return False
@@ -250,6 +295,49 @@ def _linux_signal_identity(identity: tuple[int, int, int], sig: int) -> bool:
         if pidfd is not None:
             try: os.close(pidfd)
             except OSError: pass
+
+
+def _linux_process_markers(pid: int) -> tuple[str, str]:
+    """Read only ownership markers; never log or retain the full environment."""
+    try:
+        with Path(f"/proc/{pid}/environ").open("rb") as stream:
+            raw = stream.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024: return "", ""
+        selected = {}
+        for field in raw.split(b"\0"):
+            name, separator, value = field.partition(b"=")
+            if separator and name in (b"DAXQO_PROCESS_OWNER", b"CODEX_THREAD_ID"):
+                selected[name] = value.decode("ascii", "strict")[:128]
+        return selected.get(b"DAXQO_PROCESS_OWNER", ""), selected.get(b"CODEX_THREAD_ID", "")
+    except (OSError, UnicodeError):
+        return "", ""
+
+
+def _linux_thread_process_identities(real_uid: int, directory_uid: int | None,
+                                     owner: str, threads: set[str]) -> list[tuple[str, tuple[int, int, int]]]:
+    """Find reparented commands by exact engine/thread ownership, not argv/cwd."""
+    if not sys.platform.startswith("linux") or not owner or not threads: return []
+    result = []
+    try:
+        with os.scandir("/proc") as entries:
+            pids = []
+            for entry in entries:
+                if not entry.name.isdigit(): continue
+                try:
+                    if directory_uid is None or entry.stat(follow_symlinks=False).st_uid == directory_uid:
+                        pids.append(int(entry.name))
+                except OSError:
+                    continue
+        for pid in pids:
+            current = _linux_process_identity(pid)
+            if not current or current[1] != real_uid: continue
+            process_owner, thread = _linux_process_markers(pid)
+            identity = (pid, current[1], current[3])
+            if process_owner == owner and thread in threads and _linux_identity_matches(identity):
+                result.append((thread, identity))
+    except OSError:
+        pass
+    return result
 
 
 class AppServer:
@@ -276,6 +364,11 @@ class AppServer:
         self._process_group_id: int | None = None
         self._descendants_lock = threading.Lock()
         self._tracked_descendants: dict[tuple[int, int], tuple[int, int, int]] = {}
+        self._thread_descendants: dict[str, dict[tuple[int, int], tuple[int, int, int]]] = {}
+        self._known_threads: set[str] = set()
+        self._process_owner = secrets.token_urlsafe(24)
+        self._kernel_uid: int | None = None
+        self._directory_uid: int | None = None
         self._descendants_stop = threading.Event()
         self._descendants_thread: threading.Thread | None = None
         self._write_lock = threading.Lock()
@@ -310,6 +403,7 @@ class AppServer:
         env["CODEX_HOME"] = str(self.codex_home)
         env.pop(API_KEY_ENV, None)
         env.update(self.extra_env)
+        env["DAXQO_PROCESS_OWNER"] = self._process_owner
         self.codex_home.mkdir(parents=True, exist_ok=True)
         try:
             version = subprocess.run([self.command[0], "--version"], env=env, capture_output=True,
@@ -325,13 +419,17 @@ class AppServer:
         )
         if os.name == "posix": self._process_group_id = self.process.pid
         if sys.platform.startswith("linux"):
+            identity = _linux_process_identity(self.process.pid)
+            if identity is not None: self._kernel_uid = identity[1]
+            try: self._directory_uid = Path(f"/proc/{self.process.pid}").stat().st_uid
+            except OSError: pass
             self._descendants_thread = threading.Thread(target=self._track_descendants, name="app-server-descendants", daemon=True)
             self._descendants_thread.start()
         self._reader = threading.Thread(target=self._read_stdout, name="app-server-rpc", daemon=True)
         self._reader.start()
         self._stderr = threading.Thread(target=self._read_stderr, name="app-server-stderr", daemon=True)
         self._stderr.start()
-        self.request("initialize", {"clientInfo": {"name": "phone-harness", "version": "1.0.0"}}, timeout=RPC_TIMEOUT)
+        self.request("initialize", {"clientInfo": {"name": "phone-harness", "version": APP_VERSION}}, timeout=RPC_TIMEOUT)
         self.notify("initialized", {})
         self._ready = True
         self.refresh_account()
@@ -398,8 +496,12 @@ class AppServer:
             process = self.process
             if process:
                 for pid, uid, start_ticks in _linux_descendant_identities(process.pid):
+                    identity = (pid, uid, start_ticks)
+                    owner, thread = _linux_process_markers(pid)
                     with self._descendants_lock:
-                        self._tracked_descendants[(pid, start_ticks)] = (pid, uid, start_ticks)
+                        self._tracked_descendants[(pid, start_ticks)] = identity
+                        if owner == self._process_owner and thread:
+                            self._thread_descendants.setdefault(thread, {})[(pid, start_ticks)] = identity
             self._descendants_stop.wait(0.1)
 
     def _write(self, msg: dict[str, Any]) -> None:
@@ -428,7 +530,12 @@ class AppServer:
                 failure = RpcError(message)
                 failure.rpc_rejected = True
                 raise failure
-            return msg.get("result", {})
+            result = msg.get("result", {})
+            if method in ("thread/start", "thread/resume") and isinstance(result, dict):
+                thread = result.get("thread", {}).get("id") or result.get("threadId")
+                if isinstance(thread, str) and thread:
+                    with self._descendants_lock: self._known_threads.add(thread)
+            return result
         finally:
             with self._pending_lock:
                 self._pending.pop(request_id, None)
@@ -438,11 +545,59 @@ class AppServer:
 
     def _handle_event(self, msg: dict[str, Any]) -> None:
         method, params = msg.get("method", ""), msg.get("params") or {}
+        thread = params.get("threadId")
+        if isinstance(thread, str) and thread:
+            with self._descendants_lock: self._known_threads.add(thread)
         if method == "account/login/completed":
             self.login = {k: params.get(k) for k in ("loginId", "success", "error") if k in params}
             self._login_event.set()
             threading.Thread(target=self.refresh_account, name="account-refresh", daemon=True).start()
         self.on_event(msg)
+
+    def capture_thread_processes(self, threads: set[str]) -> list[tuple[int, int, int]]:
+        if not sys.platform.startswith("linux") or not threads: return []
+        if self._kernel_uid is None:
+            raise RpcError("Cannot verify the task runtime's Linux process owner")
+        owned: dict[tuple[int, int], tuple[int, int, int]] = {}
+        # Retain identities captured before interrupt can detach/reparent tools.
+        with self._descendants_lock:
+            for thread in threads:
+                owned.update(self._thread_descendants.get(thread, {}))
+        found = _linux_thread_process_identities(self._kernel_uid, self._directory_uid,
+                                                 self._process_owner, threads)
+        with self._descendants_lock:
+            for thread, identity in found:
+                key = (identity[0], identity[2])
+                owned[key] = identity
+                self._thread_descendants.setdefault(thread, {})[key] = identity
+                self._tracked_descendants[key] = identity
+        # Descendants may deliberately clear their environment. Once their
+        # parent is proven task-owned, ancestry supplies the same ownership.
+        for identity in list(owned.values()):
+            if not _linux_identity_matches(identity): continue
+            for child in _linux_descendant_identities(identity[0]):
+                if child[1] == self._kernel_uid:
+                    owned[(child[0], child[2])] = child
+        return [identity for identity in owned.values() if _linux_identity_matches(identity)]
+
+    def terminate_thread_processes(self, threads: set[str],
+                                   captured: list[tuple[int, int, int]] = ()) -> None:
+        if not sys.platform.startswith("linux"): return
+        owned = {(pid, start): (pid, uid, start) for pid, uid, start in captured}
+        owned.update({(pid, start): (pid, uid, start) for pid, uid, start in self.capture_thread_processes(threads)})
+        for identity in reversed(list(owned.values())): _linux_signal_identity(identity, signal.SIGTERM)
+        deadline = time.monotonic() + .3
+        while time.monotonic() < deadline and any(_linux_identity_active(i) for i in owned.values()):
+            time.sleep(.025)
+        # Cover forks racing with the interrupt, while leaving other threads and
+        # other app-server instances under the same Android UID untouched.
+        owned.update({(pid, start): (pid, uid, start) for pid, uid, start in self.capture_thread_processes(threads)})
+        for identity in reversed(list(owned.values())): _linux_signal_identity(identity, signal.SIGKILL)
+        deadline = time.monotonic() + .75
+        while time.monotonic() < deadline and any(_linux_identity_active(i) for i in owned.values()):
+            time.sleep(.025)
+        if any(_linux_identity_active(identity) for identity in owned.values()):
+            raise RpcError("A task-owned local program could not be stopped")
 
     def refresh_account(self) -> dict[str, Any]:
         try:
@@ -491,6 +646,9 @@ class AppServer:
             # start_new_session makes this group exclusively owned by this app-server.
             # Signal it even if its leader already exited; descendants may still run.
             descendants = _linux_descendant_identities(process.pid) if process and sys.platform.startswith("linux") else []
+            if sys.platform.startswith("linux") and self._kernel_uid is not None:
+                with self._descendants_lock: threads = set(self._known_threads)
+                descendants.extend(self.capture_thread_processes(threads))
             self._descendants_stop.set()
             if self._descendants_thread and self._descendants_thread is not threading.current_thread():
                 self._descendants_thread.join(timeout=0.25)
@@ -900,7 +1058,7 @@ class Harness:
                    f"model_auto_compact_token_limit = {int(compact)}\n"
                    f"model_context_window = {int(context_window)}\n"
                    "tool_output_token_limit = 2000\n"
-                   f"developer_instructions = {json.dumps(agent_instructions(agent_threads), ensure_ascii=False)}\n"
+                   f"developer_instructions = {json.dumps(agent_instructions(agent_threads, bundled_motor_available()), ensure_ascii=False)}\n"
                    "preferred_auth_method = \"apikey\"\n"
                    "forced_login_method = \"api\"\n"
                    f"{catalog_setting}"
@@ -942,6 +1100,7 @@ class Harness:
                    f"env_key = {json.dumps(API_KEY_ENV)}\n"
                    "requires_openai_auth = false\n"
                    "supports_websockets = false\n")
+        content += bundled_motor_config(self.state)
         config = self.codex_home / "config.toml"
         config.write_text(content, encoding="utf-8")
         try: os.chmod(config, 0o600)
@@ -1276,10 +1435,12 @@ class Harness:
         try:
             state = self._refresh_android_permissions()
             return {"connected": True, "policyMode": state.get("policyMode", "confirm"),
+                    "wechatAllowed": state.get("wechatAllowed") is True,
                     "controlEnabled": state.get("controlEnabled"), "needsUser": state.get("needsUser", ""),
                     "approvals": [{k: v for k, v in r.items() if not k.startswith("_")} for r in self._android_approval_rows()]}
         except BridgeError as error:
             return {"connected": False, "policyMode": "unknown", "controlEnabled": None,
+                    "wechatAllowed": False,
                     "needsUser": str(error), "approvals": [{k: v for k, v in r.items() if not k.startswith("_")} for r in self._android_approval_rows()]}
 
     def decide_android_permission(self, approval_id: str, decision: str, *, task_id: str | None = None) -> dict:
@@ -1369,6 +1530,13 @@ class Harness:
         item = params.get("item") or {}
         if method == "item/completed" and item.get("type") == "mcpToolCall" and item.get("server") == "daxqo_android":
             self._record_android_tool(target, item)
+            try:
+                from android_mcp_server import observe_engine_event
+                trajectory_task = dict(self.store.row(target))
+                trajectory_task["_trajectory_subgoal"] = self._task_buffers.get(target, "")
+                observe_engine_event(self.state, trajectory_task, params)
+            except Exception:
+                pass  # Optional trajectory collection must not interrupt task execution.
         kind, text = None, None
         if method.endswith("/delta") and ("agentMessage" in method or item.get("type") == "agentMessage"):
             delta = params.get("delta", params.get("text", ""))
@@ -1647,7 +1815,7 @@ class Harness:
         if e and e.account_error: account["error"] = e.account_error
         active_rows = self.store.active_rows()
         active = next((r for r in active_rows if r["id"] == self.active_task_id), active_rows[0] if active_rows else None)
-        return {"app": {"name": "DAXQO", "version": "0.7.0"}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
+        return {"app": {"name": "DAXQO", "version": APP_VERSION}, "service": {"pid": os.getpid(), "startedAt": self.started_at},
                 "engine": {"installed": bool(self.engine_path or self.engine), "version": e.version if e else None, "connected": bool(e and e.connected)},
                 "account": account, "activeTaskId": active["id"] if active else None, "activeTaskIds": [r["id"] for r in active_rows],
                 "workspace": str(self.workspace),
@@ -1682,7 +1850,7 @@ class Harness:
             if not _provider_update or not was_reconnecting: self.reconnecting = False
 
     def _phone_thread_instructions(self, row: dict[str, Any] | None = None) -> str:
-        instructions = agent_instructions(max(1, min(4, int(self.services.settings.get("maxSubagents", 2))))) + self.phone_context.instructions()
+        instructions = agent_instructions(max(1, min(4, int(self.services.settings.get("maxSubagents", 2)))), bundled_motor_available()) + self.phone_context.instructions()
         if row and row.get("workspace_path"):
             instructions += "\nThis conversation's working directory is " + json.dumps(str(self.task_workspace(row)), ensure_ascii=False) + ". Save its work and deliverables here and link outputs relative to this directory. Other conversations have separate directories; do not use them unless the user explicitly requests it.\n"
         return instructions
@@ -1999,6 +2167,19 @@ class Harness:
     def stop(self, task_id: str) -> dict[str, Any]:
         row = self.store.row(task_id)
         if not row: raise KeyError("Task not found")
+        active = row["status"] in ("waiting_approval", "blocked_system", "queued", "running")
+        if not active: return self.store.public(row)
+        self.store.update(task_id, stop_requested=1)
+        engine = self.engine
+        threads = {row["thread_id"]} if row.get("thread_id") else set()
+        with self._task_event_lock:
+            threads.update(thread for thread, owner in self._agent_threads.items() if owner == task_id)
+        local_engine = engine if isinstance(engine, AppServer) and sys.platform.startswith("linux") else None
+        captured = []
+        if local_engine:
+            # Snapshot before turn/interrupt can tear down parents and clear
+            # task/agent mappings. Commands may have detached into new sessions.
+            captured = local_engine.capture_thread_processes(threads)
         if row["status"] in ("waiting_approval", "blocked_system"):
             self.store.update(task_id, status="stopped", stop_requested=1)
             for record in self._android_approval_rows(task_id):
@@ -2008,15 +2189,26 @@ class Harness:
                 with self.store.lock, self.store.db:
                     self.store.db.execute("UPDATE android_approvals SET status='declined' WHERE id=?", (record["id"],))
             self.store.event(task_id, "status", "stopped")
+        interruption_error = None
         if row["status"] in ("queued", "running"):
-            self.store.update(task_id, stop_requested=1)
             try:
                 with self._task_event_lock: turn = self._task_events.get(task_id, [{}])[0].get("turnId")
-                if turn: self.engine.request("turn/interrupt", {"threadId": row.get("thread_id"), "turnId": turn}, timeout=10)
+                if turn: engine.request("turn/interrupt", {"threadId": row.get("thread_id"), "turnId": turn}, timeout=10)
                 else: raise RpcError("Task has not started a turn yet")
             except Exception as exc:
-                # Keep task active; the UI must not claim cancellation succeeded without server confirmation.
-                raise ValueError(f"Could not stop task: {self.safe_text(str(exc), 200)}")
+                interruption_error = exc
+        if local_engine:
+            try:
+                local_engine.terminate_thread_processes(threads, captured)
+            except Exception as exc:
+                error = self.safe_text(str(exc), 200)
+                self.store.update(task_id, status="interrupted", error=error)
+                self.store.event(task_id, "error", error)
+                raise ValueError(f"Could not stop local programs: {error}") from None
+        if interruption_error is not None:
+            # A stopped command does not prove the model turn acknowledged its
+            # interruption, so retain the existing explicit error contract.
+            raise ValueError(f"Could not stop task: {self.safe_text(str(interruption_error), 200)}")
         return self.store.public(self.store.row(task_id))
 
 def create_handler(harness: Harness):

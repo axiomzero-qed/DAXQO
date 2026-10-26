@@ -1,0 +1,4 @@
+<resources>
+    <item name="wechat_entry_row" type="id" />
+    <item name="wechat_entry_icon" type="id" />
+</resources>

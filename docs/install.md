@@ -1,5 +1,9 @@
 # 在已有 Linux 环境中安装 DAXQO
 
+> **V1.0 当前路径：** STEPX Neo 安装 ARM64 单 APK，首次打开后从包内离线准备运行环境，不需要本文中的 Termux/Linux 安装步骤。当前 Neo 的取消链路和重启恢复仍待补验。以下内容说明 V0.x 外部 Linux 部署路径，作为旧版安装与维护参考；V1.0 详见 [V1.0 指南](V1.0.md)。
+
+国内直连安装可使用 `python3 scripts/install_linux.py --registry npmmirror`；未指定时仍使用官方源。版本与两架构 SHA512 固定校验，不更改全局源或代理配置。完整的 USB / WorkBuddy 部署步骤见 [WorkBuddy 指南](WORKBUDDY-DEPLOY.md)，下载实测见[国内源记录](MIRRORS-CN.md)。
+
 ## 中文
 
 `install_linux.py` 将 DAXQO 安装为当前 Linux 环境中的独立应用。它只在 Linux 已经运行时工作，不创建或唤醒厂商管理的容器。StepX 的 Linux 容器仍是厂商依赖；容器运行后，DAXQO 可自行启动服务、管理会话和任务，不必用 Amoo 助手聊天来启动 runtime 或发送任务。

@@ -4,8 +4,28 @@
 
 [中文](#中文) | [English](#english)
 
+## V1.0.1 更新 / V1.0.1 update
 
-## V0.7.0 本地语音、短信控制与独立任务工作区 / V0.7.0 local voice, SMS control and task workspaces
+V1.0.1 默认关闭微信操作。只有用户在手机控制页阅读封号及永久封号风险并勾选确认后才能开启；full 模式、短信、邮件和任务都不能替用户启用。具体门禁范围与限制见 [V1.0.1 说明](docs/V1.0.1.md)。验收记录仍待补充。发布 APK 预期路径：`dist/v1.0.1/DAXQO-1.0.1-arm64.apk`（体积和 SHA-256 待最终构建）。V0.7 的既有能力继续保留。
+
+V1.0.1 keeps WeChat operation off by default. A user must read the account-ban and permanent-ban risks on the phone control page and explicitly confirm before enabling it; full mode, SMS, email, and tasks cannot enable it. See the [V1.0.1 notes](docs/V1.0.1.md) for the gate's scope and limits. Acceptance results are pending. Expected APK path: `dist/v1.0.1/DAXQO-1.0.1-arm64.apk` (size and SHA-256 pending final build). Existing V0.7 capabilities remain available.
+
+
+## V1.0 单 APK 离线运行环境 / V1.0 single-APK offline runtime
+
+V1.0 面向 ARM64 STEPX Neo，把 Android 应用、PRoot、Ubuntu 用户态、Python 3.12、Codex 0.163.0、Motor、Trajectory Collector、邮件依赖和本机语音模型打进一个 APK。首次打开完全从 APK 在本机准备运行环境，无需 Termux、厂商 Linux 或电脑；云模型、邮件和短信等外部服务仍需网络或通信服务，本地语音识别在手机上运行。
+
+发布包 [DAXQO-1.0.0-arm64.apk](dist/v1.0.0/DAXQO-1.0.0-arm64.apk) 为 versionCode 100、525,139,916 bytes，SHA-256 `7b5641dd213b91a07e9ff698b4843017a8eeaeeff2633f01baddb8e81a1d3249`。签名使用本机 Android debug keystore 名称对应的密钥，但 APK 已关闭调试；后续覆盖升级必须保留并继续使用同一私钥。
+
+STEPX Neo 已通过完全断网且 Termux 停止时的首次初始化（26.02 秒）、真实模型任务及 PNG 预览、Motor Scout 6/6 页面、Collector 持久化 65 条记录、息屏锁屏定时任务和本机麦克风 ASR。取消回归通过：请求用时 0.203 秒，任务为 stopped；95 秒后未生成 end 文件，Engine 仍连接且后台 PID 保持。重启恢复也已通过：手动保存 Neo 后台权限后，第三次真实重启无需打开主界面即自动恢复，重启后新模型任务完成，迁移旧配置、任务和工作区读回通过。本轮只测 Neo，没有操作小米，也没有重发真实 SMS 或邮件。Neo 首次使用前需本人前往“系统设置 → 应用信息 → DAXQO → 耗电和后台 → 手动管理”，开启“允许自启动”“允许关联启动”“允许后台运行”，按返回保存后重新进入确认；这些系统授权不能预置进 APK，其他 Android 厂商也可能有各自设置。新安装仍需用户配置模型 API key 并按需授予 Android 权限。详见 [V1.0 Neo 验收记录](docs/V1.0-NEO-ACCEPTANCE.md)和 [V1.0 指南](docs/V1.0.md)。
+
+Windows 发布构建需要本地 Android SDK/JDK、已固定版本的 Motor 与 Collector 源码，以及本机 Android debug 签名密钥：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_v1.ps1 -MotorSource "C:\path\to\DAXQO Motor" -CollectorSource "C:\path\to\DAXQO Trajectory Collector" -Release -Lint
+```
+
+## V0.7.0 历史版本：本地语音、短信控制与独立任务工作区 / V0.7.0 historical release: local voice, SMS control and task workspaces
 
 V0.7.0 核心版（Android versionCode 17；保留 Collector/Motor 的组合 APK 为 versionCode 19）提供本机流式中文语音草稿、独立任务工作区、GUI 成果交付，以及默认关闭的可信号码短信任务控制。两台 Neo 与 Redmi K70 均已用国内 SIM 收到短信，并各自成功执行一项测试任务；Neo 自动发送的结果短信已在 K70 收到，DAXQO/RESULT 前缀被正确忽略。K70 的系统安全组件仍逐条要求确认短信发送，因此关闭了 K70 的短信结果回复；可信号码仍可提交任务，任务结果可在对话中查看。短信须明确选择可用的国内 SIM 并预先登记可信号码。普通邮件支持 Gmail、QQ 与网易，仍须登记可信联系人并验证邮件身份。语音转写可编辑且不会自动发送。版本说明见 [V0.7 指南](docs/V0.7.md)；历史记录见 [V0.5](docs/V0.5.md)、[V0.6](docs/V0.6.md) 和 [V0.6.2](docs/V0.6.2.md)。
 
@@ -13,31 +33,33 @@ V0.7.0 Core (Android versionCode 17; the combined APK retaining Collector/Motor 
 
 ## 中文
 
-DAXQO 是单仓库双平台配置：Standard 为基准版本（基准提交 `8374d89`），XM 小米版共享同一 Android 主源码、backend 与 Agent 核心，仅使用独立包名、配对 scheme 和平台提示。现有功能沿用共享核心。XM 说明见 [DAXQO for XM](docs/XM.md)；架构见[平台架构说明](docs/ARCHITECTURE.md)。
+DAXQO 使用同一 Android 主源码、backend 与 Agent 核心。默认通用 APK 包名为 `io.daxqo.app`；V1.0 本轮实测 STEPX Neo，其他机型仍需适配验收。`PlatformProfile` 按真机厂商显示相应设置提示。`-Xm` 仅用于构建旧包名 `io.daxqo.xm` 的升级兼容 APK，不是独立功能版本。见 [DAXQO for XM](docs/XM.md) 和[平台架构说明](docs/ARCHITECTURE.md)。
 
-DAXQO 是面向手机的 Agent 工作台：Android 提供持续对话与成果界面，工具在手机已有的 Linux 环境执行，模型通过用户配置的 API 接入。项目采用 [MIT 许可证](LICENSE)；仓库地址为 [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO)。第三方依赖见[第三方说明](THIRD_PARTY_NOTICES.md)。
+DAXQO 是面向手机的 Agent 工作台：Android 提供持续对话与成果界面，V1.0 的工具在 App 自带的 Linux 用户态环境执行，模型通过用户配置的 API 接入。项目采用 [MIT 许可证](LICENSE)；仓库地址为 [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO)。第三方依赖见[第三方说明](THIRD_PARTY_NOTICES.md)。
 
-当前源码为 V0.7.0，核心版 Android versionCode 17；Neo 与 K70 实测的保留 Collector/Motor 组合包为 versionCode 19。两机短信接单及任务执行通过，Neo 结果自动回信通过；K70 系统安全组件逐条拦截自动发送确认，因此 K70 已关闭结果回信，但仍支持可信号码任务控制并在对话中查看结果。功能与限制见 [V0.7 指南](docs/V0.7.md)。V0.6.2 的语音麦克风验收记录保留在 [V0.6.2 指南](docs/V0.6.2.md)，历史另见 [V0.6.1](docs/V0.6.md)、[V0.5](docs/V0.5.md) 和 [V0.4](docs/V0.4.md)。GitHub 上现有的 [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) 仍是 V0.3 APK，不包含 V0.7。构建当前源码请使用：
+V0.7.0 是历史版本记录：核心版 Android versionCode 17；旧 Neo 与 K70 组合包曾使用 versionCode 19。短信、语音草稿和邮件的原验收范围与限制见 [V0.7 指南](docs/V0.7.md)；更早记录见 [V0.6.2](docs/V0.6.2.md)、[V0.6.1](docs/V0.6.md)、[V0.5](docs/V0.5.md) 和 [V0.4](docs/V0.4.md)。当前 V1.0 构建使用上方命令；GitHub 现有 [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) 仍是旧版 APK。
+
+以下命令仅保留为 V0.x 核心 APK 的历史构建方式，不用于 V1.0 发布：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1
 ```
 
-XM APK 使用 `io.daxqo.xm` / `daxqo-xm`；Standard 默认使用 `io.daxqo.app` / `daxqo`。可用 `-Xm` 构建 XM，或用 Gradle 显式别名 `-Pplatform=xm|standard`；旧 `-Pxm=true` 仍兼容：
+默认构建通用 APK `io.daxqo.app` / `daxqo`。旧 XM 安装的覆盖升级需用 `-Xm` 构建 `io.daxqo.xm` / `daxqo-xm`；两者共享源码。Gradle 仍接受 `-Pplatform=xm|standard` 与旧 `-Pxm=true`：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1 -Xm -Lint
 ```
 
-## 快速开始
+## V0.x 外部 Linux 历史部署路径 / V0.x historical external-Linux setup
 
-1. 在手机已有且已运行的 Linux 环境中（StepX Neo 用户需先启动厂商 Linux），从仓库根目录安装 DAXQO（Python 3.10+）：
+1. 在手机 Linux 用户环境中（例如 Neo 上的 Termux + Ubuntu；仍需 Python 3.10+），从仓库根目录安装 DAXQO。无需先启动厂商 Linux；Neo 的便携环境验收范围见[记录](docs/NEO-PORTABLE-ACCEPTANCE.md)：
 
    ```sh
    python3 scripts/install_linux.py
    ```
 
-2. 可下载并安装 [V0.3 Android APK](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0)，这是开发签名预览包，也是当前 GitHub release；它不包含 V0.6。要使用当前源码功能，请从当前源码构建 APK（见上面的构建命令）。Codex runtime 是独立依赖；Linux 安装器会从官方 npm registry 获取固定版本，或复用现有官方 runtime。默认执行策略为 `danger-full-access`，运行任务可访问该 Linux 用户可访问的文件和进程。
+2. 可下载并安装 [V0.3 Android APK](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0)，这是开发签名预览包，也是当前 GitHub release；它不包含 V0.6。V0.5 两版预编译 APK 已提供[官网直接下载](https://daxqo.com/#download)，配合 [WorkBuddy 部署指南](https://daxqo.com/install/)配置后台，无需自行编译；V0.6 新增功能需使用当前源码构建的 V0.6 APK（见上面的构建命令）。Codex runtime 是独立依赖；Linux 安装器会从官方 npm registry 获取固定版本，或复用现有官方 runtime。默认执行策略为 `danger-full-access`，运行任务可访问该 Linux 用户可访问的文件和进程。
 3. 生成一次性 Android 配对链接，并仅在自己的 DAXQO App 中导入：
 
    ```sh
@@ -96,7 +118,7 @@ python3 scripts/test_assistant_client.py
 python3 scripts/test_install_assistant_skill.py
 ```
 
-GitHub 自动检查覆盖 Linux/Windows 的 Python 3.10/3.12 回归，以及 Standard/XM 的 Android 构建和 lint。已有 debug APK 时，可配置 JDK 17 的 `JAVA_HOME` 和 SDK 35 的 `ANDROID_HOME`，运行 `python3 scripts/check_android.py --platform standard`（XM 用 `--platform xm`），检查五组 Java 回归、包名/版本、配对链接、快捷方式和唤醒入口。它不连接手机。
+GitHub 自动检查覆盖 Linux/Windows 的 Python 3.10/3.12 回归，以及默认通用 APK 的 Android 构建和 lint。已有 debug APK 时，可配置 JDK 17 的 `JAVA_HOME` 和 SDK 35 的 `ANDROID_HOME`，运行 `python3 scripts/check_android.py --platform standard`（手动检查旧 XM 兼容包用 `--platform xm`），检查 Java 回归、包名/版本、配对链接、快捷方式和唤醒入口。它不连接手机。
 
 测试使用明确标记的协议/进程夹具，不替代真实手机或模型验收。Windows 若尚无 Android 构建工具，可运行：
 
@@ -110,31 +132,49 @@ powershell -ExecutionPolicy Bypass -File .\android\build.ps1 -InstallTools
 
 ## English
 
-DAXQO is one repository with two platform configurations. Standard is the baseline (baseline commit `8374d89`); XM shares the Android main source, backend, and Agent core, with its own application ID, pairing scheme, and platform guidance. Existing features use the shared core. See [DAXQO for XM](docs/XM.md) and the [platform architecture](docs/ARCHITECTURE.md).
+### V1.0 single-APK offline runtime
 
-DAXQO is a mobile Agent workspace. Its Android app provides persistent conversations and a results interface; tools run inside a Linux environment already available on the phone, and models are connected through an API configured by the user. The project uses the [MIT License](LICENSE); its repository is [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO). See [third-party notices](THIRD_PARTY_NOTICES.md) for external dependencies.
+V1.0 targets ARM64 STEPX Neo and bundles the Android app, PRoot, Ubuntu userspace, Python 3.12, Codex 0.163.0, Motor, Trajectory Collector, mail dependencies, and the local speech model in one APK. On first launch, the phone prepares its runtime entirely from the APK; Termux, vendor Linux, and a PC are not required. Cloud models, email, and SMS still need network or carrier service; speech recognition runs locally.
 
-The current source is V0.7.0 Core (Android versionCode 17); the Neo and K70 combined APKs retaining Collector/Motor use versionCode 19. SMS intake and task execution passed on both phones, and Neo result auto-reply passed. K70's system security component requires confirmation for each SMS send, so result replies are disabled there; trusted-number task intake still works and results remain visible in conversations. See the [V0.7 guide](docs/V0.7.md), the preserved [V0.6.1](docs/V0.6.md), [V0.6.2](docs/V0.6.2.md), [V0.5](docs/V0.5.md), and [V0.4](docs/V0.4.md) history. The existing [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) remains a V0.3 APK and does not include V0.7. To build the current source:
+The release APK [DAXQO-1.0.0-arm64.apk](dist/v1.0.0/DAXQO-1.0.0-arm64.apk) is versionCode 100, 525,139,916 bytes, SHA-256 `7b5641dd213b91a07e9ff698b4843017a8eeaeeff2633f01baddb8e81a1d3249`. It is non-debuggable and uses the private key associated with the existing local Android debug keystore name; retain that same key for future in-place upgrades.
+
+STEPX Neo passed fully offline first-run setup with Termux stopped (26.02 seconds), a real model task and PNG preview, Motor Scout across 6/6 pages, 65 persisted Collector records with no pending queue, a screen-off locked scheduled task, and local microphone ASR. Cancellation regression passed: request time 0.203 seconds, state stopped, no end file after 95 seconds, Engine connected, and backend PID preserved. Reboot recovery also passed: after manually saving the Neo background settings, a third real reboot restored the service without opening MainActivity; a post-reboot model task completed, and migrated configuration, tasks, and workspace data remained readable. Before first use on Neo, go to System settings → App info → DAXQO → Battery and background → Manual, enable “Allow auto-start,” “Allow associated launch,” and “Allow background running,” press Back to save, then reopen and verify. These OS permissions cannot be pre-granted in an APK, and other Android vendors may require different settings. Only Neo was tested; Xiaomi was not touched. No real SMS or email was resent in this round. New installs also need the user's model API key and any requested Android permissions. See the [V1.0 Neo acceptance record](docs/V1.0-NEO-ACCEPTANCE.md) and [V1.0 guide](docs/V1.0.md).
+
+Build a release APK on Windows with the pinned Motor and Collector sources and the existing local Android debug signing key:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_v1.ps1 -MotorSource "C:\path\to\DAXQO Motor" -CollectorSource "C:\path\to\DAXQO Trajectory Collector" -Release -Lint
+```
+
+### V0.7.0 historical core and legacy Android build
+
+DAXQO uses one Android main source tree, backend, and Agent core. The default general APK is `io.daxqo.app`; this V1.0 acceptance covers STEPX Neo, and other devices still need compatibility testing. `PlatformProfile` selects setup guidance from the actual device manufacturer. `-Xm` builds the legacy `io.daxqo.xm` package only for upgrade compatibility, not as a separate feature release. See [DAXQO for XM](docs/XM.md) and the [platform architecture](docs/ARCHITECTURE.md).
+
+DAXQO is a mobile Agent workspace. Its Android app provides persistent conversations and a results interface; V1.0 tools run inside the app's bundled Linux userspace, and models are connected through an API configured by the user. The project uses the [MIT License](LICENSE); its repository is [axiomzero-qed/DAXQO](https://github.com/axiomzero-qed/DAXQO). See [third-party notices](THIRD_PARTY_NOTICES.md) for external dependencies.
+
+V0.7.0 is historical release information: the core used Android versionCode 17, and earlier combined Neo/K70 APKs used versionCode 19. See the [V0.7 guide](docs/V0.7.md) and preserved [V0.6.1](docs/V0.6.md), [V0.6.2](docs/V0.6.2.md), [V0.5](docs/V0.5.md), and [V0.4](docs/V0.4.md) history. The existing [V0.3 release](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0) is also an older APK. Use the V1.0 build command above for the current release path.
+
+The following command is retained only for historical V0.x core APK builds; it is not the V1.0 release build:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1
 ```
 
-The XM APK uses `io.daxqo.xm` / `daxqo-xm`; Standard defaults to `io.daxqo.app` / `daxqo`. Build XM with `-Xm`, or use the explicit Gradle alias `-Pplatform=xm|standard`; the existing `-Pxm=true` alias remains supported:
+The default build is the general `io.daxqo.app` / `daxqo` APK. Use `-Xm` to build `io.daxqo.xm` / `daxqo-xm` for upgrades of legacy XM installs; both builds share the same source. Gradle still accepts `-Pplatform=xm|standard` and the legacy `-Pxm=true` alias:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\android\build.ps1 -Xm -Lint
 ```
 
-### Quick start
+### V0.x historical external-Linux setup
 
-1. Install DAXQO from the repository root in a Linux environment already available and running on the phone (StepX Neo users must start the vendor Linux environment first; Python 3.10 or newer):
+1. Install DAXQO from the repository root in a Linux userspace on the phone (for example, Termux + Ubuntu on Neo; Python 3.10 or newer). The vendor Linux environment does not need to be started first; see the [Neo portable-environment acceptance record](docs/NEO-PORTABLE-ACCEPTANCE.md):
 
    ```sh
    python3 scripts/install_linux.py
    ```
 
-2. You may download and install the [V0.3 Android APK](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0), a development-signed preview and the current GitHub release; it does not include V0.6. To use the current source features, build an APK from the current source using the command above. Codex runtime is an independent dependency; the Linux installer fetches a pinned release from the official npm registry or reuses an existing official runtime. The default execution policy is `danger-full-access`, which lets tasks access files and processes available to that Linux user.
+2. You may download and install the [V0.3 Android APK](https://github.com/axiomzero-qed/DAXQO/releases/tag/v0.3.0), a development-signed preview and the current GitHub release; it does not include V0.6. Prebuilt V0.5 Standard and XM APKs are available from the [website](https://daxqo.com/#download); follow the [WorkBuddy deployment guide](https://daxqo.com/install/) to configure the backend without compiling an APK. The new V0.6 features require a V0.6 APK built from the current source using the command above. Codex runtime is an independent dependency; the Linux installer fetches a pinned release from the official npm registry or reuses an existing official runtime. The default execution policy is `danger-full-access`, which lets tasks access files and processes available to that Linux user.
 3. Create a one-time Android pairing link and import it only into your DAXQO app:
 
    ```sh

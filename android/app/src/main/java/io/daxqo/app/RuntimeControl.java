@@ -39,7 +39,7 @@ final class RuntimeControl {
             }
             return "OK · 请求已由本机桥接受";
         } catch (Exception e) {
-            return "Linux 环境离线或运行桥不可用；请确认已有 Linux 环境已运行后重试";
+            return "本机环境尚未就绪，请点启动重试";
         } finally { if (connection != null) connection.disconnect(); }
     }
 
@@ -57,7 +57,7 @@ final class RuntimeControl {
                 result = request(base, "status", capability);
                 if (result.startsWith("OK") && !result.contains("backend_offline")) return "OK · 本机服务已就绪";
             }
-            return "Linux环境在线，但 DAXQO 服务仍未就绪；可稍后重试";
+            return "本机环境已启动，工作台仍在准备中，请稍后重试";
         }
         return result;
     }
@@ -71,7 +71,7 @@ final class RuntimeControl {
             try { Thread.sleep(Math.min(1000, deadline - SystemClock.elapsedRealtime())); }
             catch (InterruptedException e) { Thread.currentThread().interrupt(); return "启动检查已取消"; }
         }
-        return "Linux环境在线，但 DAXQO 服务仍未就绪；可稍后重试";
+        return "本机环境已启动，工作台仍在准备中，请稍后重试";
     }
 
     private static String readAll(InputStream input) throws Exception {

@@ -1,0 +1,33 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.tencent.mm.daxqofixture'
+    compileSdk 35
+
+    flavorDimensions += 'package'
+    productFlavors {
+        protectedApp {
+            dimension 'package'
+            applicationId 'com.tencent.mm.daxqofixture'
+        }
+        plain {
+            dimension 'package'
+            applicationId 'io.daxqo.wechatentryfixture'
+        }
+    }
+
+    defaultConfig {
+        applicationId 'com.tencent.mm.daxqofixture'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+    }
+    buildTypes {
+        debug {
+            debuggable true
+        }
+    }
+}

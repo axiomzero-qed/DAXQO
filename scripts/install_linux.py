@@ -26,8 +26,17 @@ from urllib.request import (HTTPRedirectHandler, ProxyHandler, Request,
                             build_opener)
 
 VERSION = "0.163.0"
-APP_VERSION = "0.7.0"
+APP_VERSION = "1.0.0"
 REGISTRY = "registry.npmjs.org"
+REGISTRY_HOSTS = {
+    "official": REGISTRY,
+    "npmmirror": "registry.npmmirror.com",
+}
+NPMMIRROR_CDN = "cdn.npmmirror.com"
+PINNED_RUNTIME_INTEGRITY = {
+    ("0.163.0", "arm64"): "sha512-IH2/R+4OarjGvsAf1ll3fdyLwrPgYLl3uzp6u9CyD9sj2Lw+ViDSe3QBZVHdcHJs0eIiZFg6Wprcuy4CRZaUGw==",
+    ("0.163.0", "x64"): "sha512-uwRaOsrYogLQhcxAM/GoeWrw0QIWEMRo7c9gM8sKAviVkZQHlu9kRLJ5PkufbV+ABGjyZgIwiFdJ0LCJ0N6e8w==",
+}
 BACKEND_PORT = 18880
 FLAT_FILES = (
     "server.py", "supervisor.py", "runtime_control.py", "test_server.py",
@@ -225,17 +234,84 @@ def _ensure_workspace_template(repo: Path, workspace: Path, log) -> None:
     log("Created workspace/AGENTS.md from the repository template")
 
 
+def _registry_metadata_path(architecture: str) -> str:
+    return f"/@openai%2Fcodex/{VERSION}-linux-{architecture}"
+
+
+def _registry_tarball_path(architecture: str) -> str:
+    return f"/@openai/codex/-/codex-{VERSION}-linux-{architecture}.tgz"
+
+
+def _mirror_cdn_path(architecture: str) -> str:
+    return (f"/packages/%40openai/codex/{VERSION}-linux-{architecture}/"
+            f"codex-{VERSION}-linux-{architecture}.tgz")
+
+
+def _validate_registry_url(url: str, registry: str, architecture: str,
+                           purpose: str) -> None:
+    host = REGISTRY_HOSTS.get(registry)
+    if host is None:
+        raise InstallError("Unsupported npm registry selection")
+    if architecture not in ("arm64", "x64"):
+        raise InstallError("Unsupported pinned runtime architecture")
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except (TypeError, ValueError):
+        raise InstallError("Registry URL is invalid") from None
+    if (parsed.scheme != "https" or parsed.username is not None
+            or parsed.password is not None or port not in (None, 443)
+            or "?" in url or "#" in url):
+        raise InstallError("Registry URL must use HTTPS without credentials, query, fragment, or a non-443 port")
+    if parsed.hostname == host:
+        if parsed.netloc.lower() not in (host, f"{host}:443"):
+            raise InstallError("Registry URL authority is not allowed")
+        allowed_paths = {
+            _registry_metadata_path(architecture),
+            _registry_tarball_path(architecture),
+        }
+        if parsed.path not in allowed_paths:
+            raise InstallError("Registry URL path is not the pinned Codex package")
+        if purpose == "metadata" and parsed.path != _registry_metadata_path(architecture):
+            raise InstallError("Registry metadata URL is not the pinned Codex version")
+        if purpose == "tarball" and parsed.path != _registry_tarball_path(architecture):
+            raise InstallError("Registry tarball URL is not the pinned Codex package")
+        return
+    if (registry == "npmmirror" and purpose == "redirect"
+            and parsed.hostname == NPMMIRROR_CDN
+            and parsed.path == _mirror_cdn_path(architecture)):
+        if parsed.netloc.lower() not in (NPMMIRROR_CDN, f"{NPMMIRROR_CDN}:443"):
+            raise InstallError("Registry URL authority is not allowed")
+        return
+    raise InstallError("Registry URL host is not allowed for the selected source")
+
+
 class _RegistryRedirects(HTTPRedirectHandler):
+    def __init__(self, registry: str = "official", architecture: str | None = None):
+        if registry not in REGISTRY_HOSTS:
+            raise InstallError("Unsupported npm registry selection")
+        if architecture is not None and architecture not in ("arm64", "x64"):
+            raise InstallError("Unsupported pinned runtime architecture")
+        self.registry = registry
+        self.architectures = (architecture,) if architecture else ("arm64", "x64")
+        super().__init__()
+
     def redirect_request(self, request, fp, code, message, headers, new_url):
-        parsed = urlsplit(new_url)
-        if (parsed.scheme != "https" or parsed.hostname != REGISTRY
-                or parsed.port not in (None, 443) or parsed.username or parsed.password):
-            raise InstallError("Registry attempted a redirect outside registry.npmjs.org")
+        for architecture in self.architectures:
+            try:
+                _validate_registry_url(new_url, self.registry, architecture, "redirect")
+                break
+            except InstallError:
+                continue
+        else:
+            raise InstallError("Registry attempted a redirect outside the selected package hosts")
         return super().redirect_request(request, fp, code, message, headers, new_url)
 
 
-def _registry_opener():
-    return build_opener(ProxyHandler({}), _RegistryRedirects())
+def _registry_opener(registry: str = "official", architecture: str | None = None):
+    if registry not in REGISTRY_HOSTS:
+        raise InstallError("Unsupported npm registry selection")
+    return build_opener(ProxyHandler({}), _RegistryRedirects(registry, architecture))
 
 
 def _read_metadata(opener, url: str) -> dict:
@@ -244,40 +320,49 @@ def _read_metadata(opener, url: str) -> dict:
         with opener.open(request, timeout=30) as response:
             raw = response.read(MAX_METADATA + 1)
     except (OSError, URLError, HTTPError) as exc:
-        raise InstallError("Could not retrieve package metadata from the official npm registry") from exc
+        raise InstallError("Could not retrieve package metadata from the selected npm registry") from exc
     if len(raw) > MAX_METADATA:
         raise InstallError("Registry package metadata is too large")
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeError, ValueError) as exc:
-        raise InstallError("Official npm package metadata is invalid") from exc
+        raise InstallError("npm package metadata is invalid") from exc
     if not isinstance(value, dict):
-        raise InstallError("Official npm package metadata is invalid")
+        raise InstallError("npm package metadata is invalid")
     return value
 
 
-def _package_details(opener, architecture: str) -> tuple[str, str]:
+def _package_details(opener, architecture: str, registry: str = "official") -> tuple[str, str]:
     package_name = "@openai/codex"
     package_version = f"{VERSION}-linux-{architecture}"
+    expected_integrity = PINNED_RUNTIME_INTEGRITY.get((VERSION, architecture))
+    if expected_integrity is None:
+        raise InstallError("No pinned SHA-512 integrity is available for this runtime version and architecture")
     encoded_name = quote(package_name, safe="@")
-    metadata = _read_metadata(opener, f"https://{REGISTRY}/{encoded_name}/{package_version}")
+    registry_host = REGISTRY_HOSTS.get(registry)
+    if registry_host is None:
+        raise InstallError("Unsupported npm registry selection")
+    metadata_url = f"https://{registry_host}/{encoded_name}/{package_version}"
+    _validate_registry_url(metadata_url, registry, architecture, "metadata")
+    metadata = _read_metadata(opener, metadata_url)
     if metadata.get("name") != package_name or metadata.get("version") != package_version:
-        raise InstallError("Official npm package name or version did not match the pinned runtime")
+        raise InstallError("npm package name or version did not match the pinned runtime")
     dist = metadata.get("dist")
     integrity = dist.get("integrity") if isinstance(dist, dict) else None
     tarball = dist.get("tarball") if isinstance(dist, dict) else None
-    if not isinstance(integrity, str) or not integrity.startswith("sha512-"):
-        raise InstallError("Official npm package does not provide SHA-512 integrity metadata")
+    if not isinstance(integrity, str) or integrity != expected_integrity:
+        raise InstallError("npm package SHA-512 integrity did not match the pinned runtime")
     try:
         base64.b64decode(integrity[7:], validate=True)
     except ValueError as exc:
-        raise InstallError("Official npm package SHA-512 metadata is invalid") from exc
+        raise InstallError("npm package SHA-512 metadata is invalid") from exc
+    if not isinstance(tarball, str):
+        raise InstallError("npm package tarball URL is invalid")
+    _validate_registry_url(tarball, registry, architecture, "tarball")
     parsed = urlsplit(tarball or "")
     expected_path = f"/@openai/codex/-/codex-{package_version}.tgz"
-    if (parsed.scheme != "https" or parsed.hostname != REGISTRY
-            or parsed.port not in (None, 443) or parsed.username or parsed.password
-            or unquote(parsed.path) != expected_path or parsed.query or parsed.fragment):
-        raise InstallError("Official npm package tarball URL is not the expected registry URL")
+    if unquote(parsed.path) != expected_path:
+        raise InstallError("npm package tarball URL is not the expected registry URL")
     return integrity, tarball
 
 
@@ -499,11 +584,12 @@ def _runtime_dir_source(source: Path, destination: Path) -> Path:
     return _copy_runtime_files(files, source, destination)
 
 
-def _registry_runtime(architecture: str, cache: Path, staging: Path, log) -> Path:
-    opener = _registry_opener()
+def _registry_runtime(architecture: str, cache: Path, staging: Path, log,
+                      registry: str = "official") -> Path:
+    opener = _registry_opener(registry=registry, architecture=architecture)
     package_version = f"{VERSION}-linux-{architecture}"
-    log(f"Looking up pinned official package @openai/codex@{package_version}")
-    integrity, tarball_url = _package_details(opener, architecture)
+    log(f"Looking up pinned {registry} package @openai/codex@{package_version}")
+    integrity, tarball_url = _package_details(opener, architecture, registry=registry)
     archive = _download_tarball(opener, tarball_url, integrity, cache)
     extract_root = Path(tempfile.mkdtemp(prefix=".codex-extract-", dir=cache))
     try:
@@ -517,7 +603,7 @@ def _registry_runtime(architecture: str, cache: Path, staging: Path, log) -> Pat
                  if parts[:len(prefix)] == prefix]
         files = [item for item in files if _regular_file(item)]
         binary = _copy_runtime_files(files, package_root, staging)
-        log("Verified and installed the official npm tarball using its SHA-512 integrity")
+        log(f"Verified and installed the {registry} npm tarball using its pinned SHA-512 integrity")
         return binary
     finally:
         shutil.rmtree(extract_root, ignore_errors=True)
@@ -537,7 +623,7 @@ def _runtime_version_dir(app: Path) -> Path:
 
 
 def _install_runtime(app: Path, runtime_dir: Path | None, architecture: str,
-                     cache: Path, log) -> tuple[Path, bool]:
+                     cache: Path, log, registry: str = "official") -> tuple[Path, bool]:
     runtime_root = _mkdir_owned(app / "runtime")
     final = _runtime_version_dir(app)
     if final.exists() or final.is_symlink():
@@ -558,7 +644,8 @@ def _install_runtime(app: Path, runtime_dir: Path | None, architecture: str,
             log("Reusing the supplied extracted Codex runtime directory")
             binary = _runtime_dir_source(runtime_dir, staging)
         else:
-            binary = _registry_runtime(architecture, cache, staging, log)
+            binary = _registry_runtime(architecture, cache, staging, log,
+                                       registry=registry)
         _probe_codex(binary)
         os.rename(staging, final)
         return final, True
@@ -723,6 +810,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="DAXQO app/state/workspace directory (default: ~/.local/share/daxqo)")
     parser.add_argument("--runtime-dir", type=Path,
                         help="Reuse an already extracted official Codex runtime directory")
+    parser.add_argument("--registry", choices=tuple(REGISTRY_HOSTS), default="official",
+                        help="Pinned runtime source: official npm registry or npmmirror (default: official)")
     parser.add_argument("--sandbox", choices=SANDBOXES, default="danger-full-access",
                         help="Codex execution permission (default: danger-full-access; no automatic fallback)")
     parser.add_argument("--print-pairing", action="store_true",
@@ -750,7 +839,8 @@ def main(argv: list[str] | None = None) -> int:
         capability, created = _capability(state)
         arch = _host_architecture()
         runtime_dir = _absolute(args.runtime_dir) if args.runtime_dir else None
-        version_dir, runtime_created = _install_runtime(app, runtime_dir, arch, cache, log)
+        version_dir, runtime_created = _install_runtime(app, runtime_dir, arch, cache, log,
+                                                        registry=args.registry)
         _write_runtime_json(app, version_dir)
         pid, status = _start_and_check(app, capability, args.sandbox, state / "supervisor.log", log)
         log(f"Health check passed for DAXQO {status.get('app', {}).get('version', APP_VERSION)}")

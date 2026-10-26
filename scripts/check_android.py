@@ -6,11 +6,13 @@ Requires JDK 17 and Android SDK 35. These checks never connect to a phone.
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 
 
 # Preserve an ASCII subst drive when Windows builds live under a Unicode path.
@@ -34,11 +36,13 @@ def require(condition: bool, message: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=("standard", "xm"), default="standard")
-    parser.add_argument("--version-code", type=int, default=17)
+    parser.add_argument("--version-code", type=int, default=101)
     parser.add_argument("--java-home", type=Path, default=os.environ.get("JAVA_HOME"))
     parser.add_argument("--sdk-root", type=Path,
                         default=os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT"))
     args = parser.parse_args()
+    if args.java_home:
+        os.environ["JAVA_HOME"] = str(Path(args.java_home).absolute())
     require(1 <= args.version_code <= 2_100_000_000, "Expected Android version code is outside its supported range.")
     require(args.sdk_root is not None, "Set ANDROID_HOME or pass --sdk-root.")
     sdk = Path(args.sdk_root)
@@ -63,6 +67,8 @@ def main() -> None:
         ("io.daxqo.app.ApprovalLedgerRegression", []),
         ("io.daxqo.app.PassiveCallbacksRegression", []),
         ("io.daxqo.app.SmsPolicyRegression", [source / "SmsPolicy.java"]),
+        ("io.daxqo.app.WechatPolicyRegression", [source / "WechatPolicy.java"]),
+        ("io.daxqo.app.OfflineRuntimeInstallerRegression", [source / "OfflineRuntimeInstaller.java"]),
     )
     compile_path = os.pathsep.join(map(str, (classes, android_jar)))
     runtime_path = os.pathsep.join(map(str, (output, classes, android_jar)))
@@ -72,6 +78,13 @@ def main() -> None:
         run([java, "-cp", runtime_path, name])
 
     apk = ANDROID / "app/build/outputs/apk/debug/app-debug.apk"
+    # Android's Windows native tools cannot open non-ASCII APK paths.
+    if os.name == "nt" and not str(apk).isascii():
+        scratch = tempfile.TemporaryDirectory(prefix="daxqo-apk-check-")
+        atexit.register(scratch.cleanup)
+        portable_apk = Path(scratch.name) / "app.apk"
+        shutil.copyfile(apk, portable_apk)
+        apk = portable_apk
     tools = sdk / "build-tools/35.0.0"
     package = "io.daxqo.xm" if args.platform == "xm" else "io.daxqo.app"
     scheme = "daxqo-xm" if args.platform == "xm" else "daxqo"

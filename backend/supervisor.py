@@ -206,9 +206,11 @@ class Supervisor:
             signal.signal(signum, self._signal)
 
     def command(self, binary: Path) -> list[str]:
+        workspace = (Path(os.environ.get("DAXQO_WORKSPACE", str(self.app / "workspace")))
+                     if os.environ.get("DAXQO_EMBEDDED") == "1" else self.app / "workspace")
         return [sys.executable, str(self.app / "server.py"), "--host", "127.0.0.1",
                 "--port", "18880", "--codex", str(binary), "--state", str(self.state),
-                "--workspace", str(self.app / "workspace"), "--sandbox", self.sandbox]
+                "--workspace", str(workspace), "--sandbox", self.sandbox]
 
     def _spawn(self, binary: Path) -> subprocess.Popen:
         assert self._log_stream is not None

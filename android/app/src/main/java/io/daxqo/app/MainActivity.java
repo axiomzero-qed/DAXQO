@@ -72,7 +72,7 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onResume() {
         super.onResume();
-        if (shouldRetryConnection(trustedGuiLoaded, connectionInProgress)) prepareAndLoadGui();
+        if (!connectionInProgress && (!RuntimeService.launched || shouldRetryConnection(trustedGuiLoaded, false))) prepareAndLoadGui();
     }
     static boolean shouldRetryConnection(boolean trusted, boolean inProgress) { return !trusted && !inProgress; }
     static boolean mayReturnToTarget(boolean visible, boolean trusted, boolean focused, boolean closing) {
@@ -332,22 +332,38 @@ public final class MainActivity extends Activity {
         connectionPanel.setVisibility(View.VISIBLE);
         webView.setVisibility(View.GONE);
         trustedGuiLoaded = false;
-        String cap = getSharedPreferences(PREFS, MODE_PRIVATE).getString(CAP_KEY, null);
-        if (cap == null) {
+        status.setText("正在启动本机工作台…");
+        try { EmbeddedRuntime.start(this); }
+        catch (Exception error) {
             connectionInProgress = false;
-            loadGuiWithCapability(null);
+            showConnectionError("本机环境未能启动，请重试");
             return;
         }
-        status.setText("检查本机服务");
         io.execute(() -> {
-            String result = RuntimeControl.ensureRunning(BRIDGE_BASE, cap);
+            String token = null;
+            String result = "本机环境启动超时，请重试";
+            try {
+                token = EmbeddedRuntime.capability(this);
+                long deadline = android.os.SystemClock.elapsedRealtime() + 600_000;
+                while (!Thread.currentThread().isInterrupted() && android.os.SystemClock.elapsedRealtime() < deadline) {
+                    if (!RuntimeService.failure.isEmpty()) { result = RuntimeService.failure; break; }
+                    String stage = RuntimeService.progress;
+                    runOnUiThread(() -> status.setText(stage));
+                    if (!RuntimeService.launched) { Thread.sleep(500); continue; }
+                    result = RuntimeControl.ensureRunning(BRIDGE_BASE, token);
+                    if (result.startsWith("OK")) break;
+                    Thread.sleep(500);
+                }
+            } catch (Exception error) { result = "本机环境未能启动，请重试"; }
+            final String cap = token;
+            final String outcome = result;
             runOnUiThread(() -> {
                 connectionInProgress = false;
-                if (result.startsWith("OK")) {
+                if (outcome.startsWith("OK")) {
                     status.setText("本机服务在线");
                     loadGuiWithCapability(cap);
                 } else {
-                    showConnectionError(result);
+                    showConnectionError(outcome);
                 }
             });
         });

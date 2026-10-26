@@ -29,6 +29,7 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.util.Locale;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Collections;
 import java.util.Map;
 import java.util.HashMap;
@@ -47,6 +48,155 @@ public final class DeviceAccessibilityService extends AccessibilityService {
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService screenshots = Executors.newSingleThreadExecutor();
     private DeviceHttpBridge bridge;
+
+    private final MotorGate motorGate = new MotorGate(android.os.SystemClock::elapsedRealtime);
+    private final MotorEvents motorEvents = new MotorEvents();
+
+    private String motorAppVersion(String pkg) {
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(pkg, 0);
+            return (info.versionName == null ? "" : info.versionName) + ":" + (Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode);
+        } catch (Exception ignored) { return "unknown"; }
+    }
+    private int motorWindowType() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return -1;
+        android.view.accessibility.AccessibilityWindowInfo window = null;
+        try { window = root.getWindow(); return window == null ? -1 : window.getType(); }
+        finally { if (window != null) window.recycle(); root.recycle(); }
+    }
+    private JSONObject motorTree(JSONObject args) throws Exception {
+        // One cache clear per requested tree, rather than a Binder refresh per node.
+        // https://developer.android.com/reference/android/accessibilityservice/AccessibilityService#clearCache()
+        boolean fresh = args.optBoolean("fresh", args.optBoolean("_motorSemanticOnly", false));
+        boolean supported = Build.VERSION.SDK_INT >= 33;
+        boolean cleared = fresh && supported && clearCache();
+        return tree().put("freshRequested", fresh).put("freshSupported", supported).put("cacheCleared", cleared);
+    }
+
+    JSONObject motorStatus() throws Exception {
+        return motorStatus(motorGate.snapshot());
+    }
+    private JSONObject motorStatus(MotorGate.Snapshot lease) throws Exception {
+        JSONObject capabilities = new JSONObject().put("accessibility", current == this)
+                .put("semantic_scroll", true).put("semantic_click", true).put("event_wait", true)
+                .put("action_lease", true).put("screenshot", Build.VERSION.SDK_INT >= 30)
+                .put("fresh_tree", Build.VERSION.SDK_INT >= 33)
+                .put("cursor_input", cursorInputMethodSupported())
+                .put("manual_takeover_detection", "touch_interaction_events_and_foreground_change");
+        return new JSONObject().put("ok", true).put("version", "daxqo.motor/0.1")
+                .put("capabilities", capabilities).put("generation", lease.generation)
+                .put("lease_active", !lease.lease.isEmpty()).put("owner", lease.owner)
+                .put("expected_package", lease.expectedPackage).put("expires_in_ms", lease.remaining)
+                .put("eventSequence", motorEvents.sequence()).put("reason", lease.reason);
+    }
+    JSONObject motorEvents(long after, int timeout) throws Exception {
+        if (after < 0 || timeout < 0 || timeout > 2000) return failure("", "invalid_args", "事件预算无效");
+        long seq = motorEvents.await(after, timeout);
+        return motorStatus().put("changed", seq > after).put("eventSequence", seq).put("sequence", seq)
+                .put("event_type", motorEvents.type()).put("packageName", motorEvents.packageName())
+                .put("scrollX", motorEvents.scrollX()).put("scrollY", motorEvents.scrollY())
+                .put("fromIndex", motorEvents.fromIndex()).put("toIndex", motorEvents.toIndex())
+                .put("itemCount", motorEvents.itemCount());
+    }
+    JSONObject motorAcquire(JSONObject request) throws Exception {
+        JSONObject denied = wechatGuard("", "lease", new JSONObject().put("packageName", request.optString("expected_package", "")));
+        if (denied != null) return denied;
+        synchronized (motorGate) {
+            denied = wechatGuard("", "lease", new JSONObject().put("packageName", request.optString("expected_package", "")));
+            if (denied != null) return denied;
+            if (request.has("lease_id") && request.has("generation") && request.optLong("generation", -1) != motorGate.generation()) return failure("", "motor_cancelled", "续租代次已失效");
+            String err = motorGate.acquire(request.optString("owner", ""), request.optString("expected_package", ""),
+                    request.optLong("ttl_ms", 30000), request.optString("lease_id", ""));
+            if (!err.isEmpty()) return failure("", err, "操作权不可用或租约参数无效");
+            MotorGate.Snapshot lease = motorGate.snapshot();
+            if (lease.lease.isEmpty()) return failure("", "motor_cancelled", "租约已失效");
+            return motorStatus(lease).put("lease_id", lease.lease);
+        }
+    }
+    JSONObject motorRelease(JSONObject request) throws Exception {
+        if (!motorGate.release(request.optString("lease_id", ""))) return failure("", "motor_cancelled", "租约已失效");
+        motorEvents.changed(0, "", -1, -1, -1, -1, -1);
+        return motorStatus();
+    }
+    JSONObject motorCancel(JSONObject request) throws Exception {
+        if (request.has("lease_id") && request.optString("lease_id", "").isEmpty()) return failure("", "motor_cancelled", "撤销租约标识无效");
+        if (!motorGate.cancel(request.optString("lease_id", ""))) return failure("", "motor_cancelled", "旧租约不能撤销其他任务");
+        motorEvents.changed(0, "", -1, -1, -1, -1, -1);
+        return motorStatus();
+    }
+    private String motorCheck(JSONObject request) {
+        if ("status".equals(request.optString("action"))) return "";
+        JSONObject claim = request.optJSONObject("motor");
+        if (request.has("motor") && (claim == null || claim.optString("lease_id", "").isEmpty()
+                || claim.optString("owner", "").isEmpty() || !claim.has("generation"))) return "motor_cancelled";
+        return motorGate.check(claim == null ? "" : claim.optString("lease_id", ""),
+                claim == null ? "" : claim.optString("owner", ""),
+                claim == null ? -1 : claim.optLong("generation", -1), foregroundPackage());
+    }
+    private void executeMotorMain(JSONObject request, String id, String action, JSONObject args, Completion callback) throws Exception {
+        // Cancel/release cannot slip between the final fence and a synchronous native action.
+        // An asynchronous OS action already dispatched cannot be undone; the next request is fenced.
+        synchronized (motorGate) {
+            String error = motorCheck(request);
+            if (!error.isEmpty()) { callback.done(failure(id, error, "操作权已撤销，未执行")); return; }
+            executeMain(id, action, args, callback);
+        }
+    }
+    private void motorEvent(AccessibilityEvent event) {
+        // Framework/passive callbacks can arrive before Android finishes real service initialization.
+        // Do not touch framework state or optional Motor helpers until both instance fields exist.
+        if (event == null || motorGate == null || motorEvents == null) return;
+        int type = event.getEventType();
+        if (type == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START && !motorGate.lease().isEmpty()) motorGate.revoke("manual_touch");
+        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && !motorGate.lease().isEmpty()) {
+            String actual = foregroundPackage();
+            if (!actual.isEmpty() && !motorGate.expectedPackage().equals(actual)) motorGate.revoke("foreground_changed");
+        }
+        motorEvents.changed(type, value(event.getPackageName(), 200), event.getScrollX(), event.getScrollY(),
+                event.getFromIndex(), event.getToIndex(), event.getItemCount());
+    }
+    private String motorSemanticState(JSONObject node) {
+        ArrayList<Integer> actions = new ArrayList<>();
+        JSONArray source = node.optJSONArray("actions");
+        for (int i = 0; source != null && i < source.length(); i++) actions.add(source.optInt(i));
+        Collections.sort(actions);
+        return "" + node.optBoolean("selected") + ":" + node.optBoolean("checked") + ":" + node.optBoolean("checkable")
+                + ":" + node.optBoolean("scrollable") + ":" + node.optBoolean("clickable") + ":" + node.optBoolean("editable") + ":" + actions;
+    }
+    private void scrollNode(String id, JSONObject args, Completion callback) throws Exception {
+        String nodeId = args.optString("nodeId", ""), observed = args.optString("snapshotId", "");
+        String direction = args.optString("direction", "forward");
+        if (nodeId.isEmpty() || nodeId.length() > 255 || observed.isEmpty() || observed.length() > 255
+                || !("forward".equals(direction) || "backward".equals(direction))) {
+            callback.done(failure(id, "invalid_args", "滚动需要有效节点、快照和方向")); return;
+        }
+        if (nodeSnapshot == null || !snapshotId.equals(observed)) {
+            callback.done(failure(id, "stale_snapshot", "滚动快照已失效，请重新读取")); return;
+        }
+        AccessibilityNodeInfo root = getRootInActiveWindow(), target = null;
+        if (root == null) { callback.done(failure(id, "no_window", "当前无可用窗口")); return; }
+        try {
+            target = nodeAt(root, nodeId);
+            if (target == null || verifiedTarget(target, nodeId, observed, foregroundPackage(), screenSize()) == null) {
+                callback.done(failure(id, "stale_snapshot", "滚动区域已变化，未执行")); return;
+            }
+            if (!target.isScrollable()) { callback.done(failure(id, "not_scrollable", "控件不支持滚动")); return; }
+            JSONObject blocked = authorizeMutation(id, "scroll_node", args, sensitiveReason());
+            if (blocked != null) { callback.done(blocked); return; }
+            if (verifiedTarget(target, nodeId, observed, foregroundPackage(), screenSize()) == null) {
+                callback.done(failure(id, "stale_snapshot", "滚动检查期间界面已变化，未执行")); return;
+            }
+            blocked = wechatGuard(id, "scroll_node", args);
+            if (blocked != null) { callback.done(blocked); return; }
+            boolean performed = target.performAction("forward".equals(direction)
+                    ? AccessibilityNodeInfo.ACTION_SCROLL_FORWARD : AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD);
+            invalidateSnapshot();
+            callback.done(success(id, new JSONObject().put("performed", performed).put("direction", direction)
+                    .put("nodeId", nodeId).put("method", "accessibility")));
+        } finally { if (target != null) target.recycle(); root.recycle(); }
+    }
+    private TrajectoryRecorder trajectory;
     private String snapshotId = "";
     private String snapshotPackage = "";
     private NodeSnapshot nodeSnapshot;
@@ -63,12 +213,15 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         }
         DeviceState.approvals.revoke();
         current = this;
+        try { trajectory = new TrajectoryRecorder(this); } catch (Exception ignored) { trajectory = null; }
         bridge = new DeviceHttpBridge(this);
         bridge.start();
         refreshNotification();
     }
 
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
+        motorEvent(event);
+        try { if (trajectory != null) trajectory.event(event); } catch (Exception ignored) { }
         // Browsing Settings or the notification shade is a user's ordinary
         // interaction, not an agent action. Passive events must not revoke or
         // restore control. Active operations enforce their own authorization.
@@ -78,16 +231,20 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         // feedback, and it is not a user request to change control permission.
     }
     @Override public void onDestroy() {
+        motorGate.revoke("service_stopped");
+        motorEvents.changed(0, "", -1, -1, -1, -1, -1);
         if (current == this) current = null;
         DeviceState.approvals.revoke();
         WakeActivity.finishActive();
         if (bridge != null) bridge.close();
+        if (trajectory != null) trajectory.close();
         screenshots.shutdownNow();
         main.removeCallbacksAndMessages(null);
         ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).cancel(NOTICE_ID);
         super.onDestroy();
     }
     boolean bridgeListening() { return bridge != null && bridge.isListening(); }
+    TrajectoryRecorder trajectory() { return trajectory; }
     boolean cursorInputMethodSupported() { return Build.VERSION.SDK_INT >= 33 && getInputMethod() != null; }
 
     void refreshNotification() {
@@ -116,6 +273,96 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         try { return value(root.getPackageName(), 200); } finally { root.recycle(); }
     }
 
+    void wechatPermissionChanged() {
+        motorGate.revoke("wechat_permission_changed");
+        motorEvents.changed(0, "", -1, -1, -1, -1, -1);
+        invalidateSnapshot();
+    }
+
+    /** Shared native fence: MCP, direct HTTP and Motor all reach this check. */
+    JSONObject wechatGuard(String id, String action, JSONObject args) {
+        if ("status".equals(action) || DeviceState.wechatAllowed(this)) return null;
+        if (!WechatPolicy.packages(false, args.optString("packageName", ""), args.optString("expectedPackage", "")).isEmpty())
+            return failure(id, WechatPolicy.BLOCKED, WechatPolicy.MESSAGE);
+        try {
+            String foreground = foregroundPackage();
+            if (WechatPolicy.protectedPackage(foreground)) return failure(id, WechatPolicy.BLOCKED, WechatPolicy.MESSAGE);
+            boolean unknown = foreground.isEmpty();
+            List<android.view.accessibility.AccessibilityWindowInfo> windows = new ArrayList<>();
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.util.SparseArray<List<android.view.accessibility.AccessibilityWindowInfo>> displays = getWindowsOnAllDisplays();
+                if (displays != null) for (int i = 0; i < displays.size(); i++) windows.addAll(displays.valueAt(i));
+            } else windows.addAll(getWindows());
+            boolean protectedWindow = false;
+            boolean coordinateEntry = false;
+            boolean coordinateAction = "tap".equals(action) || "long_press".equals(action) || "swipe".equals(action);
+            for (android.view.accessibility.AccessibilityWindowInfo window : windows) {
+                AccessibilityNodeInfo root = null;
+                try {
+                    root = window.getRoot();
+                    if (root == null) {
+                        if (window.getType() == android.view.accessibility.AccessibilityWindowInfo.TYPE_APPLICATION) unknown = true;
+                    } else if (WechatPolicy.protectedPackage(value(root.getPackageName(), 200))) protectedWindow = true;
+                    else if (coordinateAction && wechatCoordinateTarget(root, args, "swipe".equals(action), new int[] {0}, 0)) coordinateEntry = true;
+                } finally { if (root != null) root.recycle(); window.recycle(); }
+            }
+            if (protectedWindow) return failure(id, WechatPolicy.BLOCKED, WechatPolicy.MESSAGE);
+            if (coordinateEntry) return failure(id, WechatPolicy.BLOCKED, "微信相关入口已被拦截；" + WechatPolicy.MESSAGE);
+            if (Build.VERSION.SDK_INT >= 33) {
+                InputMethod ime = getInputMethod();
+                EditorInfo editor = ime == null || !ime.getCurrentInputStarted() ? null : ime.getCurrentInputEditorInfo();
+                if (editor != null && WechatPolicy.protectedPackage(editor.packageName))
+                    return failure(id, WechatPolicy.BLOCKED, WechatPolicy.MESSAGE);
+            }
+            // Wake is a system action; the first application action after it is
+            // fenced again. An unknown screen never authorizes an app action.
+            if (unknown && !"wake".equals(action)) return failure(id, "wechat_policy_unavailable", "无法确认当前应用，未执行；请先在手机上打开目标应用");
+            if ("tap".equals(action) || "long_press".equals(action) || "swipe".equals(action)) {
+                AccessibilityNodeInfo root = getRootInActiveWindow();
+                if (root == null) return failure(id, "wechat_policy_unavailable", "无法确认操作目标，未执行");
+                try {
+                    if (wechatCoordinateTarget(root, args, "swipe".equals(action), new int[] {0}, 0))
+                        return failure(id, WechatPolicy.BLOCKED, "微信相关入口已被拦截；" + WechatPolicy.MESSAGE);
+                } finally { root.recycle(); }
+            }
+            return null;
+        } catch (RuntimeException unavailable) {
+            return failure(id, "wechat_policy_unavailable", "无法检查微信操作权限，已拒绝本次手机操作");
+        }
+    }
+
+    private boolean wechatCoordinateTarget(AccessibilityNodeInfo node, JSONObject args, boolean swipe, int[] count, int depth) {
+        if (depth > 30 || ++count[0] > 1200) throw new IllegalStateException("policy_tree_budget");
+        Rect bounds = new Rect(); node.getBoundsInScreen(bounds);
+        int x = args.optInt(swipe ? "x1" : "x", -1), y = args.optInt(swipe ? "y1" : "y", -1);
+        boolean hit = bounds.contains(x, y);
+        if (swipe) {
+            int endX = args.optInt("x2", -1), endY = args.optInt("y2", -1);
+            hit |= Rect.intersects(bounds, new Rect(Math.min(x, endX), Math.min(y, endY), Math.max(x, endX) + 1, Math.max(y, endY) + 1));
+        }
+        if (hit && (WechatPolicy.protectedPackage(value(node.getPackageName(), 200))
+                || WechatPolicy.launcherTarget(node.getText()) || WechatPolicy.launcherTarget(node.getContentDescription()))) return true;
+        if (hit && node.isClickable() && wechatNodeTarget(node, new int[] {0}, 0)) return true;
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) try { if (wechatCoordinateTarget(child, args, swipe, count, depth + 1)) return true; }
+            finally { child.recycle(); }
+        }
+        return false;
+    }
+
+    private boolean wechatNodeTarget(AccessibilityNodeInfo node, int[] count, int depth) {
+        if (depth > 20 || ++count[0] > 300) throw new IllegalStateException("policy_node_budget");
+        if (WechatPolicy.protectedPackage(value(node.getPackageName(), 200))
+                || WechatPolicy.launcherTarget(node.getText()) || WechatPolicy.launcherTarget(node.getContentDescription())) return true;
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) try { if (wechatNodeTarget(child, count, depth + 1)) return true; }
+            finally { child.recycle(); }
+        }
+        return false;
+    }
+
     static JSONObject failure(String id, String code, String message) {
         JSONObject response = new JSONObject();
         try { response.put("id", id); response.put("ok", false); response.put("error", new JSONObject().put("code", code).put("message", message)); }
@@ -136,18 +383,44 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         if (args == null) args = new JSONObject();
         if (id.length() > 128 || action.length() > 40) return failure(id, "invalid_args", "请求标识过长");
         if ("status".equals(action)) return success(id, DeviceState.status(this));
+        JSONObject wechatDenied = wechatGuard(id, action, args);
+        if (wechatDenied != null) return wechatDenied;
+        String motorError = motorCheck(request);
+        if (!motorError.isEmpty()) return failure(id, motorError, "Motor操作权已失效或被其他任务占用");
+        if (request.optJSONObject("motor") != null) { try { args.put("_motorSemanticOnly", true); } catch (Exception ignored) { } }
         final JSONObject actionArgs = args;
         CountDownLatch finished = new CountDownLatch(1);
         JSONObject[] result = new JSONObject[1];
         AtomicBoolean cancelled = new AtomicBoolean(false);
         main.post(() -> {
             if (cancelled.get()) return;
-            try { executeMain(id, action, actionArgs, response -> { result[0] = response; finished.countDown(); }); }
+            JSONObject denied = wechatGuard(id, action, actionArgs);
+            if (denied != null) { result[0] = denied; finished.countDown(); return; }
+            String gateError = motorCheck(request);
+            if (!gateError.isEmpty()) { result[0] = failure(id, gateError, "操作权已被撤销，未执行"); finished.countDown(); return; }
+            final TrajectoryRecorder.Scope observed = trajectory == null ? null : trajectory.begin(request);
+            final long actionStarted = android.os.SystemClock.elapsedRealtime();
+            try { executeMotorMain(request, id, action, actionArgs, response -> {
+                long actionMs = android.os.SystemClock.elapsedRealtime() - actionStarted;
+                int settleMs = observed != null && response.optBoolean("ok") && !DeviceState.isReadOnly(action) ? 120 : 0;
+                Runnable complete = () -> {
+                    try {
+                        if (observed != null) {
+                            trajectory.finish(observed, response, actionMs, settleMs);
+                            response.put("trajectory_action_id", id);
+                        }
+                    } catch (Exception ignored) { /* Collection cannot fail an Agent action. */ }
+                    finally { result[0] = response; finished.countDown(); }
+                };
+                if (settleMs > 0) main.postDelayed(complete, settleMs); else complete.run();
+            }); }
             catch (Exception ignored) { result[0] = failure(id, "action_failed", "手机操作失败"); finished.countDown(); }
         });
         try {
             if (!finished.await(10, TimeUnit.SECONDS)) {
                 cancelled.set(true);
+                motorGate.revoke("action_timeout");
+                motorEvents.changed(0, "", -1, -1, -1, -1, -1);
                 DeviceState.requireUser(this, "操作响应超时，请检查手机后继续");
                 return failure(id, "timeout", "操作响应超时，已暂停控制；请检查实际结果，不要盲目重试");
             }
@@ -165,6 +438,8 @@ public final class DeviceAccessibilityService extends AccessibilityService {
     private interface Completion { void done(JSONObject response); }
     private void executeMain(String id, String action, JSONObject args, Completion callback) throws Exception {
         if (current != this) { callback.done(failure(id, "accessibility_unavailable", "请在系统设置中手动启用达氙手机控制")); return; }
+        JSONObject wechatDenied = wechatGuard(id, action, args);
+        if (wechatDenied != null) { callback.done(wechatDenied); return; }
         // Wake may dismiss only a non-secure swipe screen through Android's
         // official API. Secure/SIM/unknown states always remain user-controlled.
         if ("wake".equals(action)) {
@@ -205,12 +480,15 @@ public final class DeviceAccessibilityService extends AccessibilityService {
             if (blocked != null) { callback.done(blocked); return; }
         }
         switch (action) {
-            case "tree": callback.done(success(id, tree())); return;
+            case "tree": callback.done(success(id, motorTree(args))); return;
             case "screenshot": screenshot(id, callback); return;
             case "tap": case "long_press": case "swipe": gesture(id, action, args, callback); return;
             case "tap_node": tapNode(id, args, callback); return;
+            case "scroll_node": scrollNode(id, args, callback); return;
             case "input": input(id, args, callback); return;
             case "back": case "home":
+                wechatDenied = wechatGuard(id, action, args);
+                if (wechatDenied != null) { callback.done(wechatDenied); return; }
                 boolean performed = performGlobalAction("back".equals(action) ? GLOBAL_ACTION_BACK : GLOBAL_ACTION_HOME);
                 callback.done(performed ? success(id, new JSONObject().put("performed", true)) : failure(id, "action_failed", "系统未执行此操作"));
                 return;
@@ -222,6 +500,10 @@ public final class DeviceAccessibilityService extends AccessibilityService {
                 String reason = sensitivePackage(packageName) ? "打开系统授权或设置应用" : sensitiveReason();
                 JSONObject blocked = authorizeMutation(id, action, args, reason);
                 if (blocked != null) { callback.done(blocked); return; }
+                JSONObject destination = new JSONObject(args.toString());
+                if (launch.getComponent() != null) destination.put("packageName", launch.getComponent().getPackageName());
+                wechatDenied = wechatGuard(id, action, destination);
+                if (wechatDenied != null) { callback.done(wechatDenied); return; }
                 launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 startActivity(launch);
                 callback.done(success(id, new JSONObject().put("launched", true).put("packageName", packageName)));
@@ -255,6 +537,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         main.postDelayed(() -> pollWake(id, deadline, launchRequested, callback), 100);
     }
     private JSONObject paused(String id) {
+        if (!motorGate.lease().isEmpty()) { motorGate.revoke("control_paused"); motorEvents.changed(0, "", -1, -1, -1, -1, -1); }
         String reason = DeviceState.needsUser(this);
         return failure(id, reason.isEmpty() ? "paused" : "needs_user", reason.isEmpty() ? "手机控制已暂停，请在手机控制页手动开启" : reason + "；请亲自处理后在手机控制页继续");
     }
@@ -302,6 +585,8 @@ public final class DeviceAccessibilityService extends AccessibilityService {
     // A null result authorizes exactly the imminent operation. Full mode skips
     // only DAXQO's sensitivity gate, never Android's actual security checks.
     private JSONObject authorizeMutation(String id, String action, JSONObject args, String reason) throws Exception {
+        JSONObject wechatDenied = wechatGuard(id, action, args);
+        if (wechatDenied != null) return wechatDenied;
         if (!DeviceState.enabled(this) || !DeviceState.needsUser(this).isEmpty()) return paused(id);
         DeviceState.LockState lock = DeviceState.lockState(this);
         if (!lock.known || lock.locked) return lockedFailure(id, lock);
@@ -365,6 +650,8 @@ public final class DeviceAccessibilityService extends AccessibilityService {
     }
     private boolean containsOwnerConfirmation(AccessibilityNodeInfo node, int[] count, int depth) {
         if (++count[0] > 400 || depth > 30 || !node.isVisibleToUser()) return false;
+        String localText = value(node.getText(), 200).trim();
+        if (localText.contains("可能导致微信封号") || localText.contains("我已了解可能封号") || "仍要开启".equals(localText)) return true;
         if (!node.isPassword() && (node.isClickable() || value(node.getClassName(), 200).endsWith("Button"))
                 && ("批准一次".equals(value(node.getText(), 100).trim()) || "批准一次".equals(value(node.getContentDescription(), 100).trim()))) return true;
         for (int i = 0; i < Math.min(node.getChildCount(), 200); i++) {
@@ -488,6 +775,8 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         path.moveTo((float) args.getDouble(x), (float) args.getDouble(y));
         if (swipe) path.lineTo((float) args.getDouble("x2"), (float) args.getDouble("y2"));
         GestureDescription gesture = new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(path, 0, duration)).build();
+        JSONObject denied = wechatGuard(id, action, args);
+        if (denied != null) { callback.done(denied); return; }
         boolean accepted = dispatchGesture(gesture, new GestureResultCallback() {
             @Override public void onCompleted(GestureDescription description) { callback.done(success(id, new JSONObject())); }
             @Override public void onCancelled(GestureDescription description) { callback.done(failure(id, "gesture_cancelled", "手势被系统或用户中断，请重新读取屏幕")); }
@@ -525,6 +814,10 @@ public final class DeviceAccessibilityService extends AccessibilityService {
                 }
             }
             String packageName = value(root.getPackageName(), 200);
+            if (!DeviceState.wechatAllowed(this) && (WechatPolicy.protectedPackage(packageName)
+                    || node != null && WechatPolicy.protectedPackage(value(node.getPackageName(), 200)))) {
+                callback.done(failure(id, WechatPolicy.BLOCKED, WechatPolicy.MESSAGE)); return;
+            }
             if (node != null && (!node.isEnabled() || !node.isVisibleToUser())) {
                 callback.done(failure(id, "no_input", "目标输入框不可用，请重新观察")); return;
             }
@@ -552,6 +845,8 @@ public final class DeviceAccessibilityService extends AccessibilityService {
                 // accepts full Unicode without switching IME or a clipboard.
                 // This API is asynchronous: never fall back after dispatch,
                 // which could type the same text twice. Observe the result.
+                blocked = wechatGuard(id, "input", args);
+                if (blocked != null) { callback.done(blocked); return; }
                 connection.commitText((String) raw, 1, null);
                 invalidateSnapshot();
                 callback.done(success(id, new JSONObject().put("submitted", true).put("mode", mode)
@@ -569,6 +864,8 @@ public final class DeviceAccessibilityService extends AccessibilityService {
                 callback.done(failure(id, "selection_unavailable", "无法确认当前光标或选区，未改写原文；请先点击输入框并重新观察")); return;
             }
             Bundle value = new Bundle(); value.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, edit.text);
+            blocked = wechatGuard(id, "input", args);
+            if (blocked != null) { callback.done(blocked); return; }
             if (!node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, value)) {
                 callback.done(failure(id, "input_unavailable", "应用未接受直接文本输入，请重新观察目标；不要逐键点按键盘")); return;
             }
@@ -598,7 +895,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
             if (b == null || b.length() != 4) continue;
             items.add(new NodeSnapshot.Node(n.optString("id"), n.optString("text"), n.optString("description"),
                     n.optString("viewId"), n.optString("className"), b.optInt(0), b.optInt(1), b.optInt(2), b.optInt(3),
-                    n.optBoolean("visible"), n.optBoolean("enabled"), n.optBoolean("password")));
+                    n.optBoolean("visible"), n.optBoolean("enabled"), n.optBoolean("password"), motorSemanticState(n)));
         }
         return new NodeSnapshot(ident, packageName, items);
     }
@@ -638,6 +935,9 @@ public final class DeviceAccessibilityService extends AccessibilityService {
             if (target == null) {
                 callback.done(failure(id, "stale_snapshot", "目标内容或所在列表已变化，请重新读取界面；未点击")); return;
             }
+            if (!DeviceState.wechatAllowed(this) && wechatNodeTarget(targetNode, new int[] {0}, 0)) {
+                callback.done(failure(id, WechatPolicy.BLOCKED, "微信相关入口已被拦截；" + WechatPolicy.MESSAGE)); return;
+            }
             JSONObject blocked = authorizeMutation(id, "tap_node", args, sensitiveReason());
             if (blocked != null) { callback.done(blocked); return; }
             // Consent checks can query another window. Recheck this same live
@@ -647,11 +947,16 @@ public final class DeviceAccessibilityService extends AccessibilityService {
             if (target == null) {
                 callback.done(failure(id, "stale_snapshot", "目标在检查期间已变化，请重新读取界面；未点击")); return;
             }
+            blocked = wechatGuard(id, "tap_node", args);
+            if (blocked != null) { callback.done(blocked); return; }
             double x = (Math.max(0, target.left) + Math.min(size[0], target.right)) / 2.0;
             double y = (Math.max(0, target.top) + Math.min(size[1], target.bottom)) / 2.0;
             click = AccessibilityNodeInfo.obtain(targetNode);
             for (int level = 0; click != null && level < 3; level++) {
                 if (click.isClickable() && click.isVisibleToUser() && click.isEnabled()) {
+                    if (!DeviceState.wechatAllowed(this) && wechatNodeTarget(click, new int[] {0}, 0)) {
+                        callback.done(failure(id, WechatPolicy.BLOCKED, "微信相关入口已被拦截；" + WechatPolicy.MESSAGE)); return;
+                    }
                     if (click.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
                         nodeSnapshot = null; snapshotId = ""; snapshotPackage = "";
                         callback.done(success(id, new JSONObject().put("nodeId", nodeId).put("snapshotId", observed)
@@ -662,6 +967,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
                 AccessibilityNodeInfo parent = click.getParent();
                 click.recycle(); click = parent;
             }
+            if (args.optBoolean("_motorSemanticOnly")) { callback.done(failure(id, "semantic_click_unavailable", "控件无原生点击动作，请交由任务规划处理")); return; }
             gesture(id, "tap", new JSONObject().put("x", x).put("y", y), response -> {
                 if (response.optBoolean("ok")) {
                     try { response.getJSONObject("result").put("nodeId", nodeId).put("snapshotId", observed)
@@ -689,6 +995,17 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         return node;
     }
 
+    // Collector reads use an independent snapshot and do not invalidate the Agent's node IDs.
+    JSONObject trajectoryTree() throws Exception {
+        if (wechatGuard("", "tree", new JSONObject()) != null) return new JSONObject().put("nodes", new JSONArray()).put("policyBlocked", true);
+        int[] size = screenSize();
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        JSONArray nodes = new JSONArray();
+        boolean[] truncated = {false};
+        String pkg = root == null ? "" : value(root.getPackageName(), 200);
+        if (root != null) { try { appendNode(root, "0", "", nodes, 0, truncated); } finally { root.recycle(); } }
+        return new JSONObject().put("packageName", pkg).put("width", size[0]).put("height", size[1]).put("nodes", nodes).put("truncated", truncated[0]);
+    }
     private JSONObject tree() throws Exception {
         int[] size = screenSize();
         AccessibilityNodeInfo root = getRootInActiveWindow();
@@ -698,7 +1015,7 @@ public final class DeviceAccessibilityService extends AccessibilityService {
         snapshotPackage = root == null ? "" : value(root.getPackageName(), 200);
         if (root != null) { try { appendNode(root, "0", "", nodes, 0, truncated); } finally { root.recycle(); } }
         nodeSnapshot = captureNodes(snapshotId, snapshotPackage, nodes);
-        return new JSONObject().put("snapshotId", snapshotId).put("packageName", snapshotPackage).put("width", size[0]).put("height", size[1]).put("nodes", nodes).put("truncated", truncated[0]);
+        return new JSONObject().put("eventSequence", motorEvents.sequence()).put("windowType", motorWindowType()).put("packageVersion", motorAppVersion(snapshotPackage)).put("windowId", nodes.length() > 0 ? nodes.optJSONObject(0).optInt("windowId", -1) : -1).put("snapshotId", snapshotId).put("packageName", snapshotPackage).put("width", size[0]).put("height", size[1]).put("nodes", nodes).put("truncated", truncated[0]);
     }
     private void appendNode(AccessibilityNodeInfo node, String path, String parent, JSONArray nodes, int depth, boolean[] truncated) throws Exception {
         if (depth > 30 || nodes.length() >= 400) { truncated[0] = true; return; }
@@ -710,7 +1027,12 @@ public final class DeviceAccessibilityService extends AccessibilityService {
                 .put("className", value(node.getClassName(), 200)).put("viewId", value(node.getViewIdResourceName(), 250))
                 .put("bounds", new JSONArray().put(bounds.left).put(bounds.top).put(bounds.right).put(bounds.bottom))
                 .put("clickable", node.isClickable()).put("editable", node.isEditable()).put("scrollable", node.isScrollable())
-                .put("enabled", node.isEnabled()).put("visible", node.isVisibleToUser()).put("password", password);
+                .put("enabled", node.isEnabled()).put("visible", node.isVisibleToUser()).put("password", password)
+                .put("selected", node.isSelected()).put("checked", node.isChecked()).put("checkable", node.isCheckable())
+                .put("windowId", node.getWindowId());
+        JSONArray actions = new JSONArray();
+        for (AccessibilityNodeInfo.AccessibilityAction action : node.getActionList()) actions.put(action.getId());
+        item.put("actions", actions);
         item.put("focused", node.isFocused());
         if (!password && node.isEditable()) item.put("selectionStart", node.getTextSelectionStart()).put("selectionEnd", node.getTextSelectionEnd());
         nodes.put(item);
@@ -757,14 +1079,18 @@ public final class DeviceAccessibilityService extends AccessibilityService {
     private void screenshot(String id, Completion callback) {
         if (Build.VERSION.SDK_INT < 30) { callback.done(failure(id, "unsupported", "截图需要Android 11或更高版本")); return; }
         String capturePackage = foregroundPackage();
+        long captureSequence = motorEvents.sequence();
         takeScreenshot(Display.DEFAULT_DISPLAY, screenshots, new TakeScreenshotCallback() {
             @Override public void onSuccess(ScreenshotResult result) {
                 HardwareBuffer buffer = result.getHardwareBuffer();
                 Bitmap bitmap = null;
                 Bitmap copy = null;
                 try {
+                    JSONObject denied = wechatGuard(id, "screenshot", new JSONObject());
+                    if (denied != null) { callback.done(denied); return; }
                     if (DeviceState.locked(DeviceAccessibilityService.this) || !DeviceState.enabled(DeviceAccessibilityService.this)) { callback.done(paused(id)); return; }
                     if (!capturePackage.equals(foregroundPackage())) { callback.done(failure(id, "foreground_changed", "截图时前台应用已变化，请重新读取屏幕")); return; }
+                    if (captureSequence != motorEvents.sequence()) { callback.done(failure(id, "foreground_changed", "截图期间界面已变化，未返回图片")); return; }
                     bitmap = Bitmap.wrapHardwareBuffer(buffer, result.getColorSpace());
                     if (bitmap == null) { callback.done(failure(id, "screenshot_failed", "无法读取系统截图")); return; }
                     copy = bitmap.copy(Bitmap.Config.ARGB_8888, false);
@@ -773,6 +1099,8 @@ public final class DeviceAccessibilityService extends AccessibilityService {
                     if (png.size() > 12 * 1024 * 1024) { callback.done(failure(id, "screenshot_too_large", "屏幕截图超过12MB限制")); return; }
                     JSONObject image = new JSONObject().put("mimeType", "image/png").put("data", Base64.encodeToString(png.toByteArray(), Base64.NO_WRAP)).put("width", copy.getWidth()).put("height", copy.getHeight());
                     if (DeviceState.locked(DeviceAccessibilityService.this) || !DeviceState.enabled(DeviceAccessibilityService.this)) { callback.done(paused(id)); return; }
+                    denied = wechatGuard(id, "screenshot", new JSONObject());
+                    if (denied != null) { callback.done(denied); return; }
                     callback.done(success(id, new JSONObject().put("image", image).put("packageName", capturePackage)));
                 } catch (Exception ignored) { callback.done(failure(id, "screenshot_failed", "截图处理失败")); }
                 finally { if (copy != null) copy.recycle(); if (bitmap != null) bitmap.recycle(); buffer.close(); }

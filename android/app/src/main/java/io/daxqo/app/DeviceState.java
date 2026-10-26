@@ -14,6 +14,18 @@ final class DeviceState {
     private DeviceState() {}
     static SharedPreferences prefs(Context context) { return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
     static boolean enabled(Context context) { return prefs(context).getBoolean("enabled", false); }
+    static boolean wechatAllowed(Context context) {
+        try { return prefs(context).getBoolean("wechat_allowed", false); }
+        catch (RuntimeException invalid) { return false; }
+    }
+    // Only the native owner screen calls this; no bridge/config setter exists.
+    static boolean setWechatAllowed(Context context, boolean allowed) {
+        if (!prefs(context).edit().putBoolean("wechat_allowed", allowed).commit()) return false;
+        approvals.revoke();
+        DeviceAccessibilityService service = DeviceAccessibilityService.current;
+        if (service != null) service.wechatPermissionChanged();
+        return true;
+    }
     static String needsUser(Context context) { return prefs(context).getString("needs_user", ""); }
     static String policyMode(Context context) { return "full".equals(prefs(context).getString("policy_mode", "confirm")) ? "full" : "confirm"; }
     static boolean isReadOnly(String action) { return "status".equals(action) || "tree".equals(action) || "screenshot".equals(action); }
@@ -83,7 +95,7 @@ final class DeviceState {
             DeviceAccessibilityService service = DeviceAccessibilityService.current;
             LockState lock = lockState(context);
             result.put("version", context.getPackageManager().getPackageInfo(context.getPackageName(), 0).versionName);
-            PlatformProfile profile = PlatformProfile.fromId(context.getString(R.string.platform_id));
+            PlatformProfile profile = PlatformProfile.forDevice(context.getString(R.string.platform_id), android.os.Build.MANUFACTURER);
             result.put("platformId", profile.id);
             result.put("device", new JSONObject().put("manufacturer", android.os.Build.MANUFACTURER)
                     .put("model", android.os.Build.MODEL).put("androidVersion", android.os.Build.VERSION.RELEASE)
@@ -99,6 +111,7 @@ final class DeviceState {
             result.put("accessibilityConnected", service != null);
             result.put("controlEnabled", enabled(context));
             result.put("policyMode", policyMode(context));
+            result.put("wechatAllowed", wechatAllowed(context));
             result.put("approvals", approvalList());
             result.put("needsUser", needsUser(context));
             result.put("locked", lock.locked);
