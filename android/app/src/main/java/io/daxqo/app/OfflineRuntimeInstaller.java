@@ -34,7 +34,7 @@ final class OfflineRuntimeInstaller {
     private static final String ARCHIVE_ASSET = "runtime/rootfs.zip";
     private static final String SCHEMA = "daxqo.runtime/1";
     private static final String INDEX_SCHEMA = "daxqo.rootfs/1";
-    private static final String VERSION = "1.0.0";
+    private static final String VERSION = BuildConfig.VERSION_NAME.replaceFirst("-xm$", "");
 
     private OfflineRuntimeInstaller() {}
 

@@ -5,6 +5,7 @@ plugins {
 android {
     namespace 'io.daxqo.app'
     compileSdk 35
+    buildFeatures { buildConfig = true }
 
     def explicitPlatform = project.hasProperty('platform') ? property('platform').toString().trim().toLowerCase(Locale.ROOT) : null
     if (explicitPlatform != null && !(explicitPlatform in ['standard', 'xm'])) {

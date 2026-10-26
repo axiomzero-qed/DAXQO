@@ -2,6 +2,7 @@ package io.daxqo.app;
 
 import android.app.Activity;
 import android.app.Instrumentation;
+import android.app.UiAutomation;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
@@ -59,10 +60,13 @@ final class WechatGateAcceptance {
     }
 
     private void exercise() throws Exception {
+        automation();
         open(targetIntent(target, MainActivity.class));
-        for (int i = 0; i < 100 && DeviceAccessibilityService.current == null; i++) SystemClock.sleep(100);
+        for (int i = 0; i < 400 && DeviceAccessibilityService.current == null; i++) SystemClock.sleep(100);
         check("accessibility_connected", DeviceAccessibilityService.current != null);
         token = target.getSharedPreferences("pairing_private", 0).getString("capability", "");
+        for (int i = 0; i < 600 && token.length() < 32; i++) { SystemClock.sleep(100); token = target.getSharedPreferences("pairing_private", 0).getString("capability", ""); }
+        check("local_runtime_ready", token.length() >= 32);
         check("default_off_after_upgrade", !DeviceState.wechatAllowed(target));
         test.runOnMainSync(() -> { DeviceState.setEnabled(target, true); DeviceState.setPolicyMode(target, "full"); });
         denied("direct_open_real_package_off", action("open_app", new JSONObject().put("packageName", "com.tencent.mm")));
@@ -124,7 +128,7 @@ final class WechatGateAcceptance {
         final Switch[] setting = new Switch[1];
         test.runOnMainSync(() -> { setting[0] = findSwitch(ownerB.getWindow().getDecorView()); setting[0].performClick(); });
         SystemClock.sleep(400);
-        AccessibilityNodeInfo dialog = test.getUiAutomation().getRootInActiveWindow();
+        AccessibilityNodeInfo dialog = automation().getRootInActiveWindow();
         check("ban_warning_visible", hasText(dialog, "严肃提醒：可能导致微信封号"));
         AccessibilityNodeInfo yes = byId(dialog, "android:id/button1");
         check("enable_requires_acknowledgement", yes != null && !yes.isEnabled());
@@ -132,7 +136,7 @@ final class WechatGateAcceptance {
         dialog.recycle();
         remote = action("tap", new JSONObject().put("x", 900).put("y", 1800));
         check("risk_dialog_remote_write_denied", !remote.optBoolean("ok") && !DeviceState.wechatAllowed(target));
-        dialog = test.getUiAutomation().getRootInActiveWindow();
+        dialog = automation().getRootInActiveWindow();
         AccessibilityNodeInfo cancel = byId(dialog, "android:id/button2");
         check("cancel_warning", cancel != null && cancel.performAction(AccessibilityNodeInfo.ACTION_CLICK));
         if (cancel != null) cancel.recycle(); dialog.recycle();
@@ -142,6 +146,7 @@ final class WechatGateAcceptance {
         check("final_off_status", !request("/api/device/status", null).optBoolean("wechatAllowed", true));
     }
 
+    private UiAutomation automation() { return test.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES); }
     private static Intent targetIntent(Context context, Class<?> activity) { return new Intent(context, activity).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); }
     private void open(Intent intent) { target.startActivity(intent); SystemClock.sleep(600); }
     private void openPackage(String pkg) throws Exception {

@@ -133,18 +133,26 @@ class EmbeddedPreparationTests(unittest.TestCase):
                 self.assertIsNone(server.ensure_runtime_control(self.app, self.app / "state", self.workspace, 18880))
 
     def test_process_ownership_uses_proc_uid_and_still_rejects_other_uid_or_start_time(self):
-        script = self.app / "supervisor.py"
+        # Match the canonical --app argument used by the actual launcher. On
+        # Windows, TEMP may contain an 8.3 alias (for example RUNNER~1), whereas
+        # the process identity check deliberately requires its resolved path.
+        app = self.app.resolve(strict=True)
+        script = app / "supervisor.py"
         child = {"pid": 12345, "uid": 10321, "startTime": 42,
-                 "args": [sys.executable, str(script), "--app", str(self.app), "--sandbox", "danger-full-access"]}
+                 "args": [sys.executable, str(script), "--app", str(app), "--sandbox", "danger-full-access"]}
         own = {"pid": os.getpid(), "uid": 10321}
-        manager = runtime_control.RuntimeManager(self.app, self.app / "stage",
+        manager = runtime_control.RuntimeManager(app, app / "stage",
                     proc_reader=lambda pid: own if pid == os.getpid() else child)
         record = {"pid": child["pid"], "uid": 10321, "startTime": 42, "script": str(script)}
         with mock.patch.object(runtime_control.sys, "platform", "linux"), \
                 mock.patch.object(runtime_control.os, "getuid", return_value=0, create=True):
             self.assertTrue(manager._process_matches(record))
             self.assertFalse(manager._process_matches(dict(record, startTime=41)))
+            child["args"][3] = str(app / "other-app")
+            self.assertFalse(manager._process_matches(record))
+            child["args"][3] = str(app)
             child["uid"] = 10322
+            self.assertFalse(manager._process_matches(record))
             self.assertFalse(manager._process_matches(dict(record, uid=10322)))
 
     def test_bridge_bind_failure_releases_instance_lock(self):

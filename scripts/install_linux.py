@@ -26,7 +26,7 @@ from urllib.request import (HTTPRedirectHandler, ProxyHandler, Request,
                             build_opener)
 
 VERSION = "0.163.0"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 REGISTRY = "registry.npmjs.org"
 REGISTRY_HOSTS = {
     "official": REGISTRY,
