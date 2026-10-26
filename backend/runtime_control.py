@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-APP_VERSION = "0.7.0"
+APP_VERSION = "1.0.1"
 DEFAULT_PORT = 18882
 DEFAULT_BACKEND_PORT = 18880
 MAX_REQUEST = 1024 * 1024
@@ -39,6 +39,7 @@ ALLOWED_FILES = {
     "remote_email_mcp.py", "test_remote_email_mcp.py", "agent_context.py", "test_agent_context.py", "assistant_mcp_server.py", "test_assistant_mcp.py",
     "assistant_client.py", "test_assistant_client.py", "install_assistant_skill.py", "test_install_assistant_skill.py", "daxqo_handoff_SKILL.md",
     "sms_control.py", "test_sms_control.py",
+    "embedded_runtime.py", "run_motor_mcp.py", "test_embedded_runtime.py", "trajectory_hooks.py",
 }
 
 
@@ -197,6 +198,8 @@ class RuntimeManager:
             return ""
 
     def acquire_lock(self) -> None:
+        if self._lock_stream is not None:
+            return
         if not sys.platform.startswith("linux"):
             raise RuntimeError("Runtime control is supported on Linux only")
         import fcntl
@@ -286,8 +289,9 @@ class RuntimeManager:
         except (KeyError, TypeError, ValueError):
             return False
         info = self.proc_reader(pid)
-        if not info or info.get("uid") != uid or info.get("uid") != os.getuid() or info.get("startTime") != start:
+        if not info or info.get("uid") != uid or info.get("uid") != self._process_uid() or info.get("startTime") != start:
             return False
+
         try:
             expected = self._supervisor_script()
             args = info.get("args", [])
@@ -296,6 +300,12 @@ class RuntimeManager:
                     and args[2:] == ["--app", str(self.app.resolve(strict=True)), "--sandbox", "danger-full-access"])
         except (OSError, RuntimeError, BridgeError, IndexError):
             return False
+
+    def _process_uid(self) -> int:
+        # PRoot may report a simulated getuid()==0 while /proc retains the
+        # Android UID. Compare process identities within the same /proc view.
+        own = self.proc_reader(os.getpid())
+        return int(own["uid"]) if own is not None and isinstance(own.get("uid"), int) else os.getuid()
 
     def _owned_supervisor(self) -> dict[str, Any] | None:
         record = self._record_data()
@@ -307,11 +317,12 @@ class RuntimeManager:
             return None
         try:
             script = self._supervisor_script()
+            process_uid = self._process_uid()
             for entry in Path("/proc").iterdir():
                 if not entry.name.isdigit():
                     continue
                 info = self.proc_reader(int(entry.name))
-                if not info or info.get("uid") != os.getuid():
+                if not info or info.get("uid") != process_uid:
                     continue
                 args = info.get("args", [])
                 if (len(args) == 6 and Path(args[1]).resolve() == script
@@ -364,6 +375,16 @@ class RuntimeManager:
                 break
             time.sleep(.05)
         if not record:
+            # This is our direct child, so failure to establish its identity
+            # must not leave an untracked supervisor behind.
+            try:
+                child.terminate()
+                child.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=2)
+            except OSError:
+                pass
             raise BridgeError(503, "Could not verify the DAXQO supervisor process")
         self._write_record(record)
         self._child = child
@@ -524,8 +545,17 @@ class RuntimeManager:
                 return self._write_test_report(int(result[0]), str(result[1]))
             return self._write_test_report(int(result), "")
         try:
-            result = subprocess.run([sys.executable, "-m", "unittest", "test_server", "test_supervisor",
-                                     "test_runtime_control", "test_task_services", "test_android_mcp", "test_phone_backends", "test_remote_protocol", "test_remote_email_mcp", "test_email_control", "test_agent_context", "test_assistant_mcp", "test_assistant_client", "test_install_assistant_skill", "test_artifacts", "test_email_attachments"], cwd=str(cwd), stdin=subprocess.DEVNULL,
+            suites = ["test_server", "test_supervisor", "test_runtime_control", "test_task_services",
+                      "test_android_mcp", "test_phone_backends", "test_remote_protocol", "test_remote_email_mcp",
+                      "test_email_control", "test_agent_context", "test_assistant_mcp", "test_assistant_client",
+                      "test_install_assistant_skill", "test_artifacts", "test_email_attachments"]
+            if (cwd / "test_embedded_runtime.py").is_file():
+                suites.append("test_embedded_runtime")
+            # Ordinary protocol suites test the standalone contract. Embedded
+            # tests opt in explicitly so host settings do not change assertions.
+            test_env = dict(os.environ, DAXQO_EMBEDDED="0")
+            result = subprocess.run([sys.executable, "-m", "unittest", *suites], cwd=str(cwd), stdin=subprocess.DEVNULL,
+                                    env=test_env,
                                     capture_output=True, text=True, encoding="utf-8", errors="replace",
                                     timeout=600, check=False)
             output = "[stdout]\n" + (result.stdout or "") + "\n[stderr]\n" + (result.stderr or "")
@@ -656,17 +686,34 @@ class RuntimeManager:
         return {"state": state, "backend": backend_info,
                 "app": {"name": "DAXQO", "version": APP_VERSION}, "update": dict(self._update)}
 
-    def serve(self) -> None:
+    def serve(self, *, startup: Callable[[], Any] | None = None,
+              shutdown: Callable[[], Any] | None = None,
+              stop_event: threading.Event | None = None) -> None:
         self.acquire_lock()
-        server = ThreadingHTTPServer(("127.0.0.1", self.port), create_handler(self))
-        server.daemon_threads = True
+        server = None
         try:
-            server.serve_forever(poll_interval=.25)
+            server = ThreadingHTTPServer(("127.0.0.1", self.port), create_handler(self))
+            server.daemon_threads = True
+            if startup is not None:
+                startup()
+            if stop_event is None:
+                server.serve_forever(poll_interval=.25)
+            else:
+                server.timeout = .25
+                while not stop_event.is_set():
+                    server.handle_request()
         finally:
-            server.server_close()
-            if self._lock_stream:
-                self._lock_stream.close()
-                self._lock_stream = None
+            try:
+                # Embedded ownership ends while the single-instance lock is
+                # still held; a replacement cannot race with child cleanup.
+                if shutdown is not None:
+                    shutdown()
+            finally:
+                if server is not None:
+                    server.server_close()
+                if self._lock_stream:
+                    self._lock_stream.close()
+                    self._lock_stream = None
 
 
 def create_handler(manager: RuntimeManager):

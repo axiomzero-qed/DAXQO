@@ -16,15 +16,19 @@ import android.provider.Settings;
 import android.view.View;
 import android.view.WindowInsets;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Switch;
 import android.widget.Toast;
 import org.json.JSONObject;
 import io.daxqo.app.platform.PlatformProfile;
 
 public final class ControlActivity extends Activity {
     static volatile boolean visible;
+    private static int visibleOwners;
+    private boolean ownerStarted;
     static final String ACTION_PAUSE = "io.daxqo.app.PAUSE_CONTROL";
     static final String ACTION_CONTROL = "io.daxqo.app.CONTROL";
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -32,6 +36,8 @@ public final class ControlActivity extends Activity {
     private TextView activity;
     private Button toggle;
     private TextView policy;
+    private Switch wechat;
+    private boolean updatingWechat;
     private LinearLayout approvalBox;
     private String shownApprovals = "";
     private final Runnable refresh = new Runnable() {
@@ -76,6 +82,41 @@ public final class ControlActivity extends Activity {
                         DeviceState.setPolicyMode(this, full ? "confirm" : "full"); updateStatus();
                     }).show();
         });
+        wechat = new Switch(this);
+        wechat.setText("允许操作微信（高风险，默认关闭）");
+        wechat.setTextSize(16);
+        wechat.setPadding(0, dp(20), 0, dp(12));
+        wechat.setFilterTouchesWhenObscured(true);
+        wechat.setOnCheckedChangeListener((view, checked) -> {
+            if (updatingWechat) return;
+            if (!checked) {
+                if (!DeviceState.setWechatAllowed(this, false)) Toast.makeText(this, "无法保存，请重试关闭", Toast.LENGTH_LONG).show();
+                updateStatus();
+                return;
+            }
+            updatingWechat = true; wechat.setChecked(false); updatingWechat = false;
+            CheckBox accepted = new CheckBox(this);
+            accepted.setText("我已了解可能封号等严重后果，并愿意承担风险");
+            accepted.setPadding(dp(20), dp(10), dp(20), dp(10));
+            accepted.setFilterTouchesWhenObscured(true);
+            AlertDialog warning = new AlertDialog.Builder(this).setTitle("严肃提醒：可能导致微信封号")
+                    .setMessage(WechatPolicy.WARNING).setView(accepted)
+                    .setNegativeButton("保持关闭", null)
+                    .setPositiveButton("仍要开启", (dialog, which) -> {
+                        if (accepted.isChecked() && !DeviceState.setWechatAllowed(this, true))
+                            Toast.makeText(this, "无法保存，微信操作仍保持关闭", Toast.LENGTH_LONG).show();
+                        updateStatus();
+                    }).create();
+            warning.setOnShowListener(dialog -> {
+                warning.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+                accepted.setOnCheckedChangeListener((box, acknowledge) -> warning.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(acknowledge));
+                warning.getButton(AlertDialog.BUTTON_POSITIVE).setFilterTouchesWhenObscured(true);
+            });
+            warning.setOnDismissListener(dialog -> updateStatus());
+            warning.show();
+        });
+        root.addView(wechat);
+        root.addView(text("关闭时，DAXQO 手机控制接口拒绝打开、读取、截图及操作微信；完整授权也不能覆盖此开关。若其他应用自行跳转到微信，后续手机操作会被拦截。已提交给系统的操作不能撤回。", 14, Color.rgb(80, 90, 105)));
         approvalBox = new LinearLayout(this);
         approvalBox.setOrientation(LinearLayout.VERTICAL);
         root.addView(approvalBox);
@@ -89,7 +130,7 @@ public final class ControlActivity extends Activity {
             }
         });
         button(root, "3  检查电池与后台设置", v -> openSettings(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
-        PlatformProfile profile = PlatformProfile.fromId(getString(R.string.platform_id));
+        PlatformProfile profile = PlatformProfile.forDevice(getString(R.string.platform_id), android.os.Build.MANUFACTURER);
         if (!profile.setupGuidance.isEmpty()) {
             root.addView(text(profile.setupGuidance, 14, Color.rgb(80, 90, 105)));
             button(root, profile.setupButtonLabel, v -> openAppInfo());
@@ -97,7 +138,7 @@ public final class ControlActivity extends Activity {
         button(root, "添加桌面控制入口", v -> pinShortcut());
         button(root, "短信与 SIM 卡设置", v -> startActivity(new Intent(this, SmsSettingsActivity.class)));
         root.addView(text("手机未设置安全密码且没有 SIM 锁时，远程唤醒会尝试通过系统关闭滑动锁屏。安全密码、SIM 保护或无法确认的锁屏状态需要你亲自解锁。审批不会重启已暂停的控制，也不会替代系统要求的授权。", 14, Color.rgb(80, 90, 105)));
-        root.addView(text("后台运行受手机系统和电池策略影响。请按需在系统应用信息中允许后台运行，并保持已有 Linux 环境在线。达氙不会更改厂商容器或绕过系统权限。", 14, Color.rgb(80, 90, 105)));
+        root.addView(text("后台运行受手机系统和电池策略影响。请按需在系统应用信息中允许后台运行，并保持本机工作台在线。", 14, Color.rgb(80, 90, 105)));
         activity = text("", 13, Color.rgb(100, 110, 125));
         activity.setPadding(0, dp(16), 0, dp(8));
         root.addView(activity);
@@ -119,8 +160,16 @@ public final class ControlActivity extends Activity {
     }
     @Override protected void onResume() { super.onResume(); main.removeCallbacks(refresh); main.post(refresh); }
     @Override protected void onPause() { main.removeCallbacks(refresh); super.onPause(); }
-    @Override protected void onStart() { super.onStart(); visible = true; }
-    @Override protected void onStop() { visible = false; super.onStop(); }
+    @Override protected void onStart() {
+        super.onStart();
+        if (!ownerStarted) { ownerStarted = true; visibleOwners++; }
+        visible = visibleOwners > 0;
+    }
+    @Override protected void onStop() {
+        if (ownerStarted) { ownerStarted = false; visibleOwners = Math.max(0, visibleOwners - 1); }
+        visible = visibleOwners > 0;
+        super.onStop();
+    }
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     private TextView text(String value, int size, int color) {
         TextView view = new TextView(this); view.setText(value); view.setTextSize(size); view.setTextColor(color);
@@ -136,6 +185,9 @@ public final class ControlActivity extends Activity {
         if (status == null) return;
         JSONObject state = DeviceState.status(this);
         policy.setText("授权模式：" + ("full".equals(state.optString("policyMode")) ? "完整授权" : "逐项确认（默认）"));
+        updatingWechat = true;
+        wechat.setChecked(state.optBoolean("wechatAllowed", false));
+        updatingWechat = false;
         updateApprovals(state.optJSONArray("approvals"));
         String reason = state.optString("needsUser");
         boolean connected = state.optBoolean("accessibilityConnected");

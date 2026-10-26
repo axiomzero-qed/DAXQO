@@ -1,5 +1,7 @@
 # DAXQO Android 入口与 StepX 运行桥
 
+> **V1.0 当前路径：** STEPX Neo 的 ARM64 单 APK 将 PRoot、Ubuntu、Python 3.12、Codex 和扩展运行时一并交付，并在首次打开时本地初始化，不依赖外部 Termux/Linux 或电脑。取消链路和重启自动恢复尚未通过最终验收。下文 StepX 外部 Linux 运行桥描述属于 V0.x 历史路径；当前验收见 [V1.0 指南](V1.0.md)。
+
 ## 中文
 
 ### Android App

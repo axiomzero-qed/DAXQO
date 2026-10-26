@@ -14,6 +14,7 @@ build/
 .gradle/
 .android-sdk/
 .tools/
+.deps/
 *.apk
 *.aab
 *.jks

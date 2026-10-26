@@ -11,8 +11,14 @@ final class NodeSnapshot {
         final String id, text, description, viewId, className;
         final int left, top, right, bottom;
         final boolean visible, enabled, password;
+        final String semanticState;
         Node(String id, String text, String description, String viewId, String className,
              int left, int top, int right, int bottom, boolean visible, boolean enabled, boolean password) {
+            this(id, text, description, viewId, className, left, top, right, bottom, visible, enabled, password, "");
+        }
+        Node(String id, String text, String description, String viewId, String className,
+             int left, int top, int right, int bottom, boolean visible, boolean enabled, boolean password, String semanticState) {
+            this.semanticState = semanticState;
             this.id = id; this.text = text; this.description = description; this.viewId = viewId; this.className = className;
             this.left = left; this.top = top; this.right = right; this.bottom = bottom;
             this.visible = visible; this.enabled = enabled; this.password = password;
@@ -24,7 +30,7 @@ final class NodeSnapshot {
         boolean sameIdentity(Node other) {
             return other != null && Objects.equals(text, other.text) && Objects.equals(description, other.description)
                     && Objects.equals(viewId, other.viewId) && Objects.equals(className, other.className)
-                    && enabled == other.enabled && password == other.password;
+                    && enabled == other.enabled && password == other.password && Objects.equals(semanticState, other.semanticState);
         }
     }
     final String id, packageName;

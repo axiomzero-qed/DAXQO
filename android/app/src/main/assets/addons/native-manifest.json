@@ -1,0 +1,36 @@
+{
+  "schema": "daxqo.native-addons/1",
+  "version": "1.0",
+  "sources": {
+    "collector": {
+      "repository": "https://github.com/axiomzero-qed/DAXQO-Trajectory-Collector",
+      "revision": "b806183859f6d97c3e1d5450615618061ddb43b3",
+      "files": {
+        "scripts/prepare_native.py": "6d4afc09480246f813bd3224c746f6bf739e24406212169a185051d76b7add0e",
+        "integration/android/TrajectoryRecorder.java": "195783b22a4db2267e4d2578b8c8caeaf0a472522af131ffb4006d5438ad0abb",
+        "integration/backend/trajectory_hooks.py": "1ec92edac2dc79fb538a980baaf3906a4c915381a4a09f68aeee3abd178b2515"
+      }
+    },
+    "motor": {
+      "repository": "https://github.com/axiomzero-qed/DAXQO-Motor",
+      "revision": "0485317fa107e5380f3cadaf142991eada7788cc",
+      "files": {
+        "scripts/prepare_native.py": "f312536ff368d9e731b226c88048488c5edaac81295a31fff41e792033235322",
+        "native/MotorGate.java": "531639fc79a064b4b35a44d1502ce14841aee6deb5a864f2466ceaf1a28ac822",
+        "native/MotorEvents.java": "a131225434cbe1d46dac38dfe5c59fe6ae4b02c66ed3efb26ac93f65d30a51bb"
+      }
+    }
+  },
+  "generated": {
+    "android/app/src/main/java/io/daxqo/app/DeviceAccessibilityService.java": "c4aa95d54255c1f6676aeecd572330b22e70e8d54359046a9d577ad60e80f8b8",
+    "android/app/src/main/java/io/daxqo/app/DeviceHttpBridge.java": "73ca0874981ceedec825ca36d45c35c981961d2843936e6489f836eb7c1f9834",
+    "android/app/src/main/java/io/daxqo/app/NodeSnapshot.java": "0ba3be2950f94511d6fdc74315b90eae48ef0d49f2bd49bbe494f1ffd42f19ce",
+    "android/app/src/main/java/io/daxqo/app/TrajectoryRecorder.java": "195783b22a4db2267e4d2578b8c8caeaf0a472522af131ffb4006d5438ad0abb",
+    "android/app/src/main/java/io/daxqo/app/MotorGate.java": "531639fc79a064b4b35a44d1502ce14841aee6deb5a864f2466ceaf1a28ac822",
+    "android/app/src/main/java/io/daxqo/app/MotorEvents.java": "a131225434cbe1d46dac38dfe5c59fe6ae4b02c66ed3efb26ac93f65d30a51bb",
+    "android/app/src/main/res/xml/device_accessibility.xml": "79cfcb73d43b26e1f85316002af41bc64c46edf9567f7f2c8269f5e4de673c86",
+    "backend/server.py": "c2073318484f28a62777b9780c1b78af1955447621176feacbb7bdafffa2e2e0",
+    "backend/android_mcp_server.py": "4bcee5abd729e2eb76cac1a2bc489fca5112cbe349e6f00a605d3c7a23796289",
+    "backend/trajectory_hooks.py": "1ec92edac2dc79fb538a980baaf3906a4c915381a4a09f68aeee3abd178b2515"
+  }
+}

@@ -1,8 +1,10 @@
 """Protocol, persistence, and HTTP boundary tests using a local fake subprocess fixture."""
 import json
 import base64
+import errno
 import os
 import socket
+import signal
 import subprocess
 import stat
 import sys
@@ -453,6 +455,28 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual([model["id"] for model in models], ["private-model"])
         self.assertTrue(models[0]["isDefault"])
 
+    def test_proc_fallback_tracks_real_uid_despite_virtual_directory_ownership(self):
+        identities = {
+            100: (100, 10204, 1, 1000),
+            101: (101, 10204, 100, 1010),
+            102: (102, 10204, 101, 1020),
+            103: (103, 10205, 100, 1030),
+            104: (104, 10204, 1, 1040),
+        }
+        entries = []
+        for pid in identities:
+            entry = Mock()
+            entry.name = str(pid)
+            entry.stat.return_value.st_uid = 0
+            entries.append(entry)
+        with patch("server._linux_process_identity", side_effect=identities.get), \
+                patch("server.Path") as paths, patch("server.os.scandir") as scan:
+            paths.return_value.iterdir.side_effect = OSError("Kernel child lists unavailable")
+            paths.return_value.stat.return_value.st_uid = 0
+            scan.return_value.__enter__.return_value = entries
+            self.assertEqual(server._linux_descendant_identities(100),
+                             [(101, 10204, 1010), (102, 10204, 1020)])
+
     @unittest.skipIf(os.name == "nt", "SIGTERM process lifecycle is exercised on the phone's Linux runtime")
     def test_sigterm_stops_http_server_and_codex_child(self):
         port_socket = socket.socket()
@@ -810,7 +834,7 @@ for line in sys.stdin:
             with urllib.request.urlopen(req) as response:
                 result = json.loads(response.read())
                 self.assertTrue(result["engine"]["connected"])
-                self.assertEqual(result["app"], {"name":"DAXQO", "version":"0.7.0"})
+                self.assertEqual(result["app"], {"name":"DAXQO", "version":server.APP_VERSION})
         finally:
             http.shutdown(); http.server_close()
 
@@ -1313,6 +1337,14 @@ class AndroidOwnerConsentTests(unittest.TestCase):
             self.h._engine_event({"method":"turn/completed", "params":{"threadId":"thread-other", "turnId":"turn-1", "status":"completed"}})
         self.assertEqual(self.h.store.row("other")["status"], "waiting_approval")
 
+    def test_wechat_permission_is_read_only_and_defaults_closed(self):
+        self.assertFalse(self.h.android_permissions()["wechatAllowed"])
+        self.snapshot["wechatAllowed"] = "true"
+        self.assertFalse(self.h.android_permissions()["wechatAllowed"])
+        self.snapshot["wechatAllowed"] = True
+        self.assertTrue(self.h.android_permissions()["wechatAllowed"])
+        self.assertIn("wechat_blocked", server.agent_instructions(2, motor_enabled=True))
+
     def test_accept_continues_original_task_once_and_replay_adds_no_grant(self):
         self.h.store.update("owner", status="waiting_approval"); self.h.send_message = Mock()
         self.h.decide_android_permission(self.a["id"], "accept", task_id="owner")
@@ -1346,6 +1378,36 @@ class AndroidOwnerConsentTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform.startswith("linux"), "Linux process identity checks")
 class ProcDiscoveryTests(unittest.TestCase):
+    def test_thread_discovery_uses_real_uid_and_exact_engine_and_thread_markers(self):
+        identities = {101: (101, 10196, 1, 11), 102: (102, 10196, 1, 12),
+                      103: (103, 10197, 1, 13), 104: (104, 10196, 1, 14)}
+        markers = {101: ("engine-a", "thread-a"), 102: ("engine-a", "thread-b"),
+                   103: ("engine-a", "thread-a"), 104: ("engine-b", "thread-a")}
+        entries = []
+        for pid in identities:
+            entry = Mock(); entry.name = str(pid); entry.stat.return_value.st_uid = 0
+            entries.append(entry)
+        with patch.object(server.os, "getuid", return_value=0), \
+                patch.object(server.os, "scandir") as scan, \
+                patch.object(server, "_linux_process_identity", side_effect=identities.get), \
+                patch.object(server, "_linux_process_markers", side_effect=markers.get):
+            scan.return_value.__enter__.return_value = entries
+            self.assertEqual(server._linux_thread_process_identities(10196, 0, "engine-a", {"thread-a"}),
+                             [("thread-a", (101, 10196, 11))])
+
+    def test_pidfd_syscall_failure_falls_back_to_identity_checked_kill(self):
+        identity = (12345, 10196, 77)
+        with patch.object(server.os, "pidfd_open", side_effect=OSError(errno.ENOSYS, "PRoot syscall unavailable")), \
+                patch.object(server.signal, "pidfd_send_signal"), \
+                patch.object(server.os, "kill") as kill, \
+                patch.object(server, "_linux_process_identity", return_value=(12345, 10196, 1, 77)):
+            self.assertTrue(server._linux_signal_identity(identity, signal.SIGTERM))
+            kill.assert_called_once_with(12345, signal.SIGTERM)
+            kill.reset_mock()
+            with patch.object(server, "_linux_process_identity", return_value=(12345, 10196, 1, 78)):
+                self.assertFalse(server._linux_signal_identity(identity, signal.SIGTERM))
+            kill.assert_not_called()
+
     def test_kernel_without_task_children_uses_verified_uid_snapshot(self):
         task = MagicMock()
         task.joinpath.return_value.read_text.side_effect = FileNotFoundError()
@@ -1360,9 +1422,80 @@ class ProcDiscoveryTests(unittest.TestCase):
         with patch.object(server, "Path") as paths, patch.object(server.os, "scandir") as scan, \
                 patch.object(server, "_linux_process_identity", side_effect=identities.get) as identify:
             paths.return_value.iterdir.return_value = [task]
+            paths.return_value.stat.return_value.st_uid = 1000
             scan.return_value.__enter__.return_value = iter([own, other])
             self.assertEqual(server._linux_descendant_identities(100), [(101, 1000, 11)])
             self.assertNotIn(unittest.mock.call(102), identify.call_args_list)
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "Real task-process cancellation requires Linux /proc")
+class TaskProcessCancellationTests(unittest.TestCase):
+    def test_stop_kills_reparented_relative_command_without_stopping_concurrent_task(self):
+        with tempfile.TemporaryDirectory(prefix="daxqo-stop-process-") as temp:
+            root = Path(temp).resolve()
+            job = root / "job-source.py"
+            job.write_text("import os,signal,time\nfrom pathlib import Path\n"
+                           "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+                           "Path('job.pid').write_text(str(os.getpid()))\n"
+                           "Path('cancel-start').write_text('started')\n"
+                           "time.sleep(3.5)\nPath('cancel-end').write_text('finished')\n", encoding="utf-8")
+            fake = root / "interrupt-without-killing.py"
+            fake.write_text(f'''import json,os,subprocess,sys
+from pathlib import Path
+threads={{}}
+for line in sys.stdin:
+ m=json.loads(line);method=m.get('method');p=m.get('params',{{}});result={{}};event=None
+ if method=='initialize':result={{'userAgent':'task-cancel-fixture'}}
+ elif method=='account/read':result={{'account':{{'type':'chatgpt'}},'requiresOpenaiAuth':False}}
+ elif method=='thread/start':
+  thread='fixture-thread-'+str(len(threads)+1);threads[thread]=p['cwd'];result={{'thread':{{'id':thread}}}}
+ elif method=='turn/start':
+  thread=p['threadId'];cwd=Path(threads[thread]);(cwd/'cancel_sleep.py').write_text(Path({str(job)!r}).read_text())
+  (cwd/'launch.py').write_text("import subprocess,sys\\nsubprocess.Popen([sys.executable,'cancel_sleep.py'],start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\\n")
+  env=dict(os.environ,CODEX_THREAD_ID=thread)
+  subprocess.Popen([sys.executable,'launch.py'],cwd=str(cwd),env=env,start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+  result={{'turn':{{'id':'turn-'+thread}}}}
+ elif method=='turn/interrupt':
+  event={{'jsonrpc':'2.0','method':'turn/completed','params':{{'threadId':p['threadId'],'turn':{{'id':p['turnId'],'status':'interrupted'}}}}}}
+ if 'id' in m:print(json.dumps({{'jsonrpc':'2.0','id':m['id'],'result':result}}),flush=True)
+ if event:print(json.dumps(event),flush=True)
+''', encoding="utf-8")
+            engine = server.AppServer([sys.executable, str(fake)], root / "codex", lambda _: None)
+            harness = None
+            try:
+                engine.start()
+                harness = server.Harness("not-installed", root / "state", root / "workspace", "127.0.0.1", 18880,
+                                         test_engine=engine, sandbox="danger-full-access")
+                first = harness.start_task({"prompt": "fixture A"})
+                second = harness.start_task({"prompt": "fixture B"})
+                a = harness.task_workspace(harness.store.row(first["id"]))
+                b = harness.task_workspace(harness.store.row(second["id"]))
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    if ((a / "cancel-start").is_file() and (b / "cancel-start").is_file()
+                            and harness.store.row(first["id"])["turn_id"]): break
+                    time.sleep(.025)
+                self.assertTrue((a / "cancel-start").is_file())
+                self.assertTrue((b / "cancel-start").is_file())
+                self.assertFalse((a / "cancel-end").exists(), "fixture expired before stop could be exercised")
+                pid_a = int((a / "job.pid").read_text())
+                pid_b = int((b / "job.pid").read_text())
+                self.assertEqual(os.getsid(pid_a), pid_a, "fixture must detach from the app-server session")
+                # Match the phone's unsupported pidfd syscalls while exercising
+                # real TERM/KILL and per-task ownership, not mocked termination.
+                with patch.object(server.os, "pidfd_open", side_effect=OSError(errno.ENOSYS, "PRoot fixture")):
+                    harness.stop(first["id"])
+                self.assertFalse(pid_running(pid_a), "stopped task's detached command survived")
+                self.assertTrue(pid_running(pid_b), "concurrent task was incorrectly signalled")
+                self.assertTrue(engine.connected, "stopping one task closed the shared app-server")
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not (b / "cancel-end").exists(): time.sleep(.025)
+                self.assertTrue((b / "cancel-end").is_file(), "other task did not finish its real command")
+                self.assertFalse((a / "cancel-end").exists(), "cancelled command wrote its delayed end file")
+                self.assertEqual(harness.store.row(first["id"])["status"], "stopped")
+            finally:
+                engine.close()
+                if harness is not None: harness.store.db.close()
 
 
 if __name__ == "__main__": unittest.main()

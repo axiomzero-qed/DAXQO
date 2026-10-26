@@ -27,6 +27,15 @@ public final class PlatformProfile {
         if ("xm".equals(id)) return new PlatformProfile("xm", true);
         throw new IllegalArgumentException("Unknown platform profile: " + id);
     }
+    /** Keeps the build identity while selecting Xiaomi guidance from the actual device OEM. */
+    public static PlatformProfile forDevice(String buildId, String manufacturer) {
+        PlatformProfile buildProfile = fromId(buildId);
+        if (manufacturer == null || manufacturer.trim().isEmpty()) return buildProfile;
+        String name = manufacturer.toLowerCase(java.util.Locale.ROOT);
+        boolean xiaomi = name.contains("xiaomi") || name.contains("redmi") || name.contains("poco");
+        if (!xiaomi && preferredStores(manufacturer).length == 0) return buildProfile;
+        return new PlatformProfile(buildProfile.id, xiaomi);
+    }
     public String[] appStoreCandidates() { return stores.clone(); }
 
     /** Returns known OEM stores first, preserving the selected profile's order for all others. */

@@ -16,6 +16,11 @@ class MailDepsError(RuntimeError):
     pass
 
 
+OFFICIAL_INDEX_URL = "https://pypi.org/simple"
+USTC_INDEX_URL = "https://mirrors.ustc.edu.cn/pypi/simple"
+INDEX_URLS = (OFFICIAL_INDEX_URL, USTC_INDEX_URL)
+
+
 def _owned_directory(path: Path, *, required: bool) -> bool:
     try:
         info = path.lstat()
@@ -49,7 +54,9 @@ def resolve_paths(app_arg: Path) -> tuple[Path, Path, Path]:
     return app, target, requirements
 
 
-def install(app_arg: Path) -> None:
+def install(app_arg: Path, index_url: str = OFFICIAL_INDEX_URL) -> None:
+    if index_url not in INDEX_URLS:
+        raise MailDepsError("Unsupported PyPI index URL")
     app, target, requirements = resolve_paths(app_arg)
     runtime = app / "runtime"
     install_linux._mkdir_owned(runtime)
@@ -58,7 +65,7 @@ def install(app_arg: Path) -> None:
     command = [
         sys.executable, "-m", "pip", "install",
         "--require-hashes", "--no-deps", "--disable-pip-version-check",
-        "--no-compile", "--index-url", "https://pypi.org/simple",
+        "--no-compile", "--index-url", index_url,
         "--target", str(target), "-r", str(requirements),
     ]
     env = {key: value for key, value in os.environ.items()
@@ -77,9 +84,13 @@ def main(argv: list[str] | None = None) -> int:
         "--app", type=Path, default=Path.home() / "phone-harness",
         help="existing DAXQO APP directory (default: ~/phone-harness)",
     )
+    parser.add_argument(
+        "--index-url", choices=INDEX_URLS, default=OFFICIAL_INDEX_URL,
+        help="fixed package index URL (default: official PyPI)",
+    )
     args = parser.parse_args(argv)
     try:
-        install(args.app)
+        install(args.app, index_url=args.index_url)
     except (MailDepsError, install_linux.InstallError, OSError,
             subprocess.CalledProcessError) as exc:
         print(f"Mail dependency installation failed: {exc}", file=sys.stderr)

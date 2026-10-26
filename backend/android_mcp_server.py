@@ -30,10 +30,11 @@ SENSITIVE_KEY = re.compile(r"(?i)(?:capability|authorization|access[_-]?token|re
 
 
 class BridgeError(Exception):
-    def __init__(self, code: str, message: str, approval: dict | None = None):
+    def __init__(self, code: str, message: str, approval: dict | None = None, action_id: str | None = None):
         super().__init__(message)
         self.code = code
         self.approval = _public_value(approval) if isinstance(approval, dict) else None
+        self.action_id = action_id
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -165,7 +166,7 @@ class AndroidBridge:
 
     def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         route = (method, path) in (("GET", "/api/device/status"), ("GET", "/api/device/approvals"),
-                                  ("POST", "/api/device/execute"))
+                                  ("POST", "/api/device/execute"), ("POST", "/api/trajectory/feedback"))
         if method == "GET" and path.startswith("/api/device/apps"):
             parts = urllib.parse.urlsplit(path)
             try:
@@ -270,11 +271,13 @@ class AndroidBridge:
             error = response.get("error") if isinstance(response.get("error"), dict) else {}
             code = error.get("code") if isinstance(error.get("code"), str) else "action_rejected"
             message = error.get("message") if isinstance(error.get("message"), str) else "Android bridge rejected the action"
-            raise BridgeError(code[:80], message[:500], error.get("approval"))
+            raise BridgeError(code[:80], message[:500], error.get("approval"), response.get("trajectory_action_id"))
         result = response.get("result")
         if not isinstance(result, dict):
             return {"result": _public_value(result)}
         public = _public_value(result)
+        if response.get("trajectory_action_id") == request_id:
+            public["trajectory_action_id"] = request_id
         if action == "screenshot":
             source_image = result.get("image")
             safe_image = public.get("image") if isinstance(public, dict) else None
@@ -492,6 +495,7 @@ class AndroidMCP:
             except BridgeError as exc:
                 error = {"code": exc.code, "message": str(exc)}
                 if exc.approval is not None: error["approval"] = exc.approval
+                if exc.action_id is not None: error["trajectory_action_id"] = exc.action_id
                 result = self._tool_result([self._text({"ok": False, "error": error})], is_error=True)
         else:
             return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": "Method not found"}}
@@ -537,3 +541,85 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# Optional trajectory feedback (embedded for existing update allowlists).
+"""Optional public model-decision metadata. No chain of thought or credentials.
+
+Native action IDs returned in MCP results provide exact correlation even for
+concurrent tasks. There is no ambient 'current task' shared by MCP processes.
+The bounded background queue cannot block the existing app-server callback.
+"""
+import json
+import queue
+import re
+import threading
+from pathlib import Path
+from typing import Any
+
+_queue: queue.Queue = queue.Queue(maxsize=64)
+_lock = threading.Lock()
+_thread: threading.Thread | None = None
+_SENSITIVE = re.compile(r'(?i)(password|token|secret|api.?key|验证码|密码|银行卡|聊天|支付)')
+
+
+def _safe(value: Any, key='') -> Any:
+    if _SENSITIVE.search(key) or key in ('text', 'image', 'data'):
+        return '[REDACTED]'
+    if isinstance(value, dict):
+        return {str(k): _safe(v, str(k)) for k, v in list(value.items())[:40]}
+    if isinstance(value, list):
+        return [_safe(v) for v in value[:20]]
+    if isinstance(value, str):
+        if _SENSITIVE.search(value): return '[REDACTED]'
+        return re.sub(r'(?i)([\w.+-]+@[\w.-]+\.[a-z]{2,}|(?<!\d)\d{6,}(?!\d)|sk-[\w-]+)', '[REDACTED]', value[:1000])
+    return value
+
+
+def _work():
+    from android_mcp_server import AndroidBridge
+    while True:
+        state, body = _queue.get()
+        try:
+            AndroidBridge(Path(state), timeout=2).request('POST', '/api/trajectory/feedback', body)
+        except Exception:
+            pass  # Recorder absence/failure never fails a running task.
+        finally:
+            _queue.task_done()
+
+
+def observe_engine_event(state: Path, task: dict, params: dict) -> None:
+    global _thread
+    item = params.get('item') or {}
+    content = (item.get('result') or {}).get('content') or []
+    ids = []
+    for entry in content:
+        if not isinstance(entry, dict) or entry.get('type') != 'text': continue
+        try:
+            value = json.loads(entry.get('text', ''))
+        except (ValueError, TypeError):
+            continue
+        for candidate in (value, value.get('error', {}), value.get('tree', {})):
+            ident = candidate.get('trajectory_action_id') if isinstance(candidate, dict) else None
+            if isinstance(ident, str) and re.fullmatch(r'[0-9a-f-]{36}', ident): ids.append(ident)
+    # Candidate lists and confidence are not invented when the provider omits them.
+    arguments = item.get('arguments') or {}
+    if isinstance(arguments, str):
+        try: arguments = json.loads(arguments)
+        except ValueError: arguments = {}
+    decision = {'source': 'deepseek_agent', 'model': task.get('model'), 'tool_call_id': item.get('id'),
+                'tool': item.get('tool'), 'selected_action': _safe(arguments),
+                'candidate_actions': [], 'confidence': None}
+    body_task = {'id': task['id'], 'user_task': _safe(task.get('prompt', '')),
+                 'subgoal': _safe(task.get('_trajectory_subgoal', '')), 'stage': task.get('status', 'running'), 'source': 'agent'}
+    for ident in set(ids):
+        try:
+            _queue.put_nowait((str(state), {'action_id': ident, 'task': body_task, 'decision': decision,
+                            'verification': {'status': 'unverified', 'source': 'agent_claim'}}))
+        except queue.Full:
+            return
+    if ids:
+        with _lock:
+            if _thread is None or not _thread.is_alive():
+                _thread = threading.Thread(target=_work, name='trajectory-feedback', daemon=True)
+                _thread.start()

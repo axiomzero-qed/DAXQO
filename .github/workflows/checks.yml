@@ -30,10 +30,6 @@ jobs:
       - run: python -m unittest discover -s scripts -v
 
   android:
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [standard, xm]
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -51,14 +47,67 @@ jobs:
         with:
           gradle-version: '8.10.2'
           cache-provider: basic
+      - uses: actions/checkout@v7
+        with:
+          repository: axiomzero-qed/DAXQO-Motor
+          ref: 0485317fa107e5380f3cadaf142991eada7788cc
+          path: .deps/DAXQO-Motor
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: axiomzero-qed/DAXQO-Trajectory-Collector
+          ref: b806183859f6d97c3e1d5450615618061ddb43b3
+          path: .deps/DAXQO-Trajectory-Collector
+          persist-credentials: false
+      - name: Cache pinned offline build inputs
+        uses: actions/cache@v4
+        with:
+          path: .tools/offline-inputs
+          key: offline-inputs-${{ hashFiles('scripts/build_offline_runtime.py', 'scripts/fetch_offline_inputs.py', 'scripts/prepare_embedded_native.py', 'scripts/prepare_runtime_licenses.py') }}
+      - name: Cache verified mail libraries
+        uses: actions/cache@v4
+        with:
+          path: .tools/mail-libs
+          key: mail-libs-${{ hashFiles('scripts/mail-requirements.txt') }}
       - name: Cache pinned offline voice runtime downloads
         uses: actions/cache@v4
         with:
           path: .tools/voice-runtime
           key: voice-runtime-${{ hashFiles('android/tools/prepare_voice_runtime.py') }}
       - name: Install Android SDK 35
-        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"'
-      - name: Build and lint
-        run: gradle -p android --no-daemon -Pplatform=${{ matrix.platform }} assembleDebug lintDebug
-      - name: Host regressions and packaged APK checks
-        run: python scripts/check_android.py --platform ${{ matrix.platform }}
+        run: |
+          printf 'y\n%.0s' {1..100} | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+      - name: Fetch verified offline build inputs
+        run: python scripts/fetch_offline_inputs.py --output-dir .tools/offline-inputs
+      - name: Stage ARM64 native prerequisites
+        run: python scripts/prepare_embedded_native.py --cache-dir .tools/offline-inputs --output-dir .tools/offline-runtime
+      - name: Install pinned mail libraries
+        run: python -m pip install --disable-pip-version-check --target .tools/mail-libs --no-compile --require-hashes --no-deps -r scripts/mail-requirements.txt
+      - name: Build bundled Ubuntu and Codex runtime
+        run: >-
+          python scripts/build_offline_runtime.py
+          --rootfs .tools/offline-inputs/noble-server-cloudimg-arm64-root.tar.xz
+          --codex .tools/offline-inputs/codex-0.163.0-linux-arm64.tgz
+          --motor-source .deps/DAXQO-Motor/motor
+          --collector-source .deps/DAXQO-Trajectory-Collector/trajectory
+          --mail-libs .tools/mail-libs
+          --output-dir .tools/offline-runtime
+      - name: Stage runtime license bundle
+        run: >-
+          python scripts/prepare_runtime_licenses.py
+          --source-dir .tools/offline-inputs/runtime-sources
+          --output-dir .tools/offline-runtime
+          --release-dir dist/v1.0.1
+          --rootfs-zip .tools/offline-runtime/assets/runtime/rootfs.zip
+      - name: Build and lint complete V1 APK
+        run: >-
+          gradle -p android --no-daemon -Pplatform=standard
+          :app:assembleDebug :app:lintDebug
+          :app:assembleDebugAndroidTest
+          :wechat-policy-fixture:assembleProtectedAppDebug
+          :wechat-policy-fixture:assemblePlainDebug
+      - name: Host Java regressions and APK identity checks
+        run: python scripts/check_android.py --platform standard
+      - name: Verify bundled offline runtime APK
+        run: python scripts/check_offline_apk.py --apk android/app/build/outputs/apk/debug/app-debug.apk

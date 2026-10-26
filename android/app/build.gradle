@@ -5,6 +5,7 @@ plugins {
 android {
     namespace 'io.daxqo.app'
     compileSdk 35
+    buildFeatures { buildConfig = true }
 
     def explicitPlatform = project.hasProperty('platform') ? property('platform').toString().trim().toLowerCase(Locale.ROOT) : null
     if (explicitPlatform != null && !(explicitPlatform in ['standard', 'xm'])) {
@@ -20,8 +21,10 @@ android {
         applicationId xmBuild ? 'io.daxqo.xm' : 'io.daxqo.app'
         minSdk 26
         targetSdk 35
-        versionCode 17
-        versionName xmBuild ? '0.7.0-xm' : '0.7.0'
+        versionCode 101
+        versionName xmBuild ? '1.0.1-xm' : '1.0.1'
+        ndk { abiFilters 'arm64-v8a' }
+        testInstrumentationRunner 'io.daxqo.app.V1Instrumentation'
         resValue 'string', 'app_name', xmBuild ? 'DAXQO for XM' : '达氙 DAXQO'
         resValue 'string', 'platform_id', xmBuild ? 'xm' : 'standard'
         resValue 'string', 'pairing_scheme', xmBuild ? 'daxqo-xm' : 'daxqo'
@@ -32,6 +35,24 @@ android {
         jniLibs {
             // Compress all supported native ABIs in the standalone APK.
             useLegacyPackaging = true
+        }
+    }
+    androidResources { noCompress += ['zip'] }
+}
+
+def offlineRuntimeDir = providers.gradleProperty('offlineRuntimeDir')
+        .map { file(it) }.getOrElse(rootProject.file('../.tools/offline-runtime'))
+android.sourceSets.main.assets.srcDir(new File(offlineRuntimeDir, 'assets'))
+android.sourceSets.main.jniLibs.srcDir(new File(offlineRuntimeDir, 'jniLibs'))
+def verifyOfflineRuntime = tasks.register('verifyOfflineRuntime') {
+    inputs.dir(offlineRuntimeDir)
+    doLast {
+        for (String name : ['assets/runtime/manifest.json', 'assets/runtime/rootfs.zip',
+                            'jniLibs/arm64-v8a/libproot.so', 'jniLibs/arm64-v8a/libproot_loader.so',
+                            'jniLibs/arm64-v8a/libtalloc.so', 'jniLibs/arm64-v8a/libandroid-shmem.so']) {
+            if (!new File(offlineRuntimeDir, name).isFile()) {
+                throw new GradleException('Missing V1 offline runtime: ' + name + '. Run scripts/build_v1.ps1 first.')
+            }
         }
     }
 }
@@ -63,5 +84,5 @@ dependencies {
 }
 
 tasks.named('preBuild').configure {
-    dependsOn(prepareVoiceRuntime)
+    dependsOn(prepareVoiceRuntime, verifyOfflineRuntime)
 }

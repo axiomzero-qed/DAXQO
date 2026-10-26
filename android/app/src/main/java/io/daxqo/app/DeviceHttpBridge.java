@@ -89,6 +89,29 @@ final class DeviceHttpBridge {
             if (start[1].startsWith("/api/sms/")) { handleSms(client, input, start[0], start[1], headers); return; }
             if ("GET".equals(start[0]) && "/api/device/status".equals(start[1])) { reply(client, 200, DeviceState.status(service)); return; }
             if ("GET".equals(start[0]) && "/api/device/approvals".equals(start[1])) { reply(client, 200, new JSONObject().put("approvals", DeviceState.approvalList())); return; }
+
+            if ("GET".equals(start[0]) && start[1].startsWith("/api/motor/")) {
+                if ("/api/motor/status".equals(start[1])) { reply(client, 200, service.motorStatus()); return; }
+                if (start[1].startsWith("/api/motor/events?")) {
+                    android.net.Uri uri = android.net.Uri.parse(start[1]);
+                    try { reply(client, 200, service.motorEvents(Long.parseLong(uri.getQueryParameter("after")), Integer.parseInt(uri.getQueryParameter("timeoutMs")))); }
+                    catch (IllegalArgumentException ignored) { reply(client, 400, error("invalid_args", "事件参数无效")); }
+                    return;
+                }
+                reply(client, 404, error("not_found", "Motor接口不存在")); return;
+            }
+            TrajectoryRecorder recorder = service.trajectory();
+            if ("GET".equals(start[0]) && start[1].startsWith("/api/trajectory/")) {
+                if (recorder == null) { reply(client, 503, error("collector_unavailable", "采集模块不可用，手机控制仍可使用")); return; }
+                if ("/api/trajectory/status".equals(start[1])) { reply(client, 200, recorder.status()); return; }
+                if (start[1].startsWith("/api/trajectory/batch?")) {
+                    android.net.Uri uri = android.net.Uri.parse(start[1]);
+                    try { reply(client, 200, recorder.batch(Long.parseLong(uri.getQueryParameter("after")), Integer.parseInt(uri.getQueryParameter("limit")))); }
+                    catch (IllegalArgumentException ignored) { reply(client, 400, error("invalid_args", "批次参数无效")); }
+                    return;
+                }
+                reply(client, 404, error("not_found", "采集接口不存在")); return;
+            }
             if ("GET".equals(start[0]) && start[1].startsWith("/api/device/apps")) {
                 CatalogArgs args = parseCatalogArgs(start[1]);
                 if (args == null) { reply(client, 400, error("invalid_request", "应用目录查询参数无效")); return; }
@@ -96,7 +119,9 @@ final class DeviceHttpBridge {
                 return;
             }
             boolean approvalDecision = start[1].matches("/api/device/approvals/[a-fA-F0-9-]{36}");
-            if (!"POST".equals(start[0]) || (!"/api/device/execute".equals(start[1]) && !approvalDecision)) { reply(client, 404, error("not_found", "接口不存在")); return; }
+            boolean trajectoryRoute = start[1].matches("/api/trajectory/(config|ack|feedback)");
+            boolean motorRoute = start[1].matches("/api/motor/(lease|release|cancel)");
+            if (!"POST".equals(start[0]) || (!"/api/device/execute".equals(start[1]) && !approvalDecision && !trajectoryRoute && !motorRoute)) { reply(client, 404, error("not_found", "接口不存在")); return; }
             String mime = headers.get("content-type");
             if (mime == null || !mime.toLowerCase(Locale.ROOT).matches("application/json(?:\\s*;.*)?")) { reply(client, 415, error("invalid_request", "请求必须使用JSON格式")); return; }
             int length;
@@ -113,6 +138,22 @@ final class DeviceHttpBridge {
             JSONObject request;
             try { request = new JSONObject(new String(bytes, StandardCharsets.UTF_8)); }
             catch (Exception ignored) { reply(client, 400, error("invalid_request", "JSON格式无效")); return; }
+
+            if (motorRoute) {
+                if (start[1].endsWith("/cancel")) { reply(client, 200, service.motorCancel(request)); return; }
+                if (start[1].endsWith("/release")) { reply(client, 200, service.motorRelease(request)); return; }
+                synchronized (actions) { reply(client, 200, service.motorAcquire(request)); }
+                return;
+            }
+            if (trajectoryRoute) {
+                if (recorder == null) { reply(client, 503, error("collector_unavailable", "采集模块不可用，手机控制仍可使用")); return; }
+                try {
+                    JSONObject value = start[1].endsWith("/config") ? recorder.configure(request)
+                            : start[1].endsWith("/ack") ? recorder.ack(request) : recorder.feedback(request);
+                    reply(client, 200, value);
+                } catch (Exception ignored) { reply(client, 400, error("invalid_args", "采集参数或存储不可用")); }
+                return;
+            }
             if (approvalDecision) {
                 String approvalId = start[1].substring("/api/device/approvals/".length());
                 reply(client, 200, service.decideApproval(approvalId, request.optString("decision", "")));
@@ -123,6 +164,8 @@ final class DeviceHttpBridge {
             JSONObject response;
             // Serialize actions and remember their result, so retrying an id cannot repeat a tap or input.
             synchronized (actions) {
+                JSONObject policyDenied = service.wechatGuard(id, request.optString("action"), request.optJSONObject("args") == null ? new JSONObject() : request.optJSONObject("args"));
+                if (policyDenied != null) { reply(client, 200, policyDenied); return; }
                 boolean mutation = !"status".equals(request.optString("action")) && !"tree".equals(request.optString("action")) && !"screenshot".equals(request.optString("action"));
                 if (mutation) {
                     String digest = Base64Digest(bytes);
